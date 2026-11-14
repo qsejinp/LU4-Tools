@@ -37,6 +37,12 @@ function Find-Dir($prog) {
   return $null
 }
 
+# 0) clean up running LU4 (hidden powershell) instances so files aren't locked and duplicates are cleared
+#    (keeps THIS admin window; closes other powershell.exe windows)
+Write-Host 'Closing background program instances...' -ForegroundColor Cyan
+try { Get-Process powershell -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $PID } | Stop-Process -Force -ErrorAction SilentlyContinue } catch {}
+Start-Sleep -Milliseconds 800
+
 $done = 0
 foreach ($prog in @('LU4_ChatTranslate', 'LU4_GrindMeter')) {
   $dir = Find-Dir $prog
