@@ -55,7 +55,9 @@ foreach ($prog in @('LU4_ChatTranslate', 'LU4_GrindMeter')) {
       $dst = Join-Path $dir ($e.FullName -replace '/', '\')
       if (($keep -contains $leaf -or $leaf -match $keepPat) -and (Test-Path $dst)) { continue }
       $pdir = Split-Path $dst -Parent; if (-not (Test-Path $pdir)) { New-Item -ItemType Directory -Path $pdir -Force | Out-Null }
-      [System.IO.Compression.ZipFileExtensions]::ExtractToFile($e, $dst, $true); $n++
+      if (Test-Path $dst) { try { (Get-Item $dst -Force).Attributes = [System.IO.FileAttributes]::Normal } catch {} }
+      try { [System.IO.Compression.ZipFileExtensions]::ExtractToFile($e, $dst, $true); $n++ }
+      catch { try { Remove-Item $dst -Force -ErrorAction Stop; [System.IO.Compression.ZipFileExtensions]::ExtractToFile($e, $dst, $true); $n++ } catch { Write-Host ("  ! " + $leaf + " failed (in use?): " + $_.Exception.Message) -ForegroundColor DarkYellow } }
     }
   } finally { $z.Dispose(); Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
   Write-Host ("[" + $prog + "] DONE - " + $n + " files updated (settings kept)") -ForegroundColor Green
