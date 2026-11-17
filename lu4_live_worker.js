@@ -1,6 +1,7 @@
 // LU4 Tools 실행 중인 사람 세기 (Cloudflare Worker + D1)  - made by DoZ
-// 프로그램이 5분마다 /ping 으로 익명 번호를 보내면, 최근 10분 안에 보낸 번호를 "지금 실행 중"으로 셉니다.
-// 저장하는 것: 무작위 번호, 프로그램 종류, 버전, 처음/마지막 신호 시각 (이름·IP 등은 저장하지 않음)
+// 프로그램이 5분마다 /ping 으로 무작위 번호를 보내면, 최근 10분 안에 보낸 번호를 "지금 실행 중"으로 셉니다.
+// 저장하는 것: 무작위 번호, 프로그램 종류, 버전, 캐릭터 이름, 처음/마지막 신호 시각 (IP 등은 저장하지 않음)
+// 캐릭터 이름은 /json?key=비밀키 로만 볼 수 있음(비밀키는 Cloudflare의 Secret 변수 VIEW_KEY)
 
 const APPS = { chat: '채팅번역', meter: '사냥지표' };
 const LIVE_SEC = 600;              // 10분 안에 신호가 오면 실행 중
@@ -12,6 +13,7 @@ async function init(db) {
   await db.prepare(
     'CREATE TABLE IF NOT EXISTS pings (id TEXT NOT NULL, app TEXT NOT NULL, ver TEXT, first INTEGER, last INTEGER, PRIMARY KEY (id, app))'
   ).run();
+  try { await db.prepare('ALTER TABLE pings ADD COLUMN name TEXT').run(); } catch (e) { /* 이미 있음 */ }
   ready = true;
 }
 
@@ -28,13 +30,15 @@ export default {
       const id = url.searchParams.get('id') || '';
       const app = url.searchParams.get('app') || '';
       const ver = url.searchParams.get('v') || '';
+      let name = (url.searchParams.get('n') || '').trim();
+      if (!/^[A-Za-z0-9_\uAC00-\uD7A3]{2,24}$/.test(name)) name = '';
       if (!/^[a-f0-9]{16,40}$/.test(id) || !(app in APPS) || (ver && !/^\d{8}\.\d{4}$/.test(ver))) {
         return new Response('bad', { status: 400 });
       }
       await env.DB.prepare(
-        'INSERT INTO pings (id, app, ver, first, last) VALUES (?1, ?2, ?3, ?4, ?4) ' +
-        'ON CONFLICT (id, app) DO UPDATE SET ver = ?3, last = ?4'
-      ).bind(id, app, ver, now).run();
+        'INSERT INTO pings (id, app, ver, first, last, name) VALUES (?1, ?2, ?3, ?4, ?4, ?5) ' +
+        "ON CONFLICT (id, app) DO UPDATE SET ver = ?3, last = ?4, name = CASE WHEN ?5 <> '' THEN ?5 ELSE name END"
+      ).bind(id, app, ver, now, name).run();
       return new Response('ok', { headers: { 'cache-control': 'no-store' } });
     }
 
@@ -50,6 +54,12 @@ export default {
     const data = {};
     for (const a in APPS) data[a] = { live: pick(live, a), today: pick(today, a), total: pick(total, a) };
     data.livePeople = people[0] ? people[0].n : 0;
+    // 캐릭터 이름 목록: 비밀키가 맞을 때만
+    const key = url.searchParams.get('key') || '';
+    if (env.VIEW_KEY && key === env.VIEW_KEY) {
+      const us = await q("SELECT id, MAX(COALESCE(name, '')) name, GROUP_CONCAT(app) apps, MAX(last) last FROM pings WHERE last >= ?1 GROUP BY id ORDER BY name", now - LIVE_SEC);
+      data.users = us.map(u => ({ name: u.name || '(이름 확인 전)', apps: String(u.apps || '').split(',').filter(a => a in APPS), ago: now - u.last }));
+    }
 
     if (url.pathname === '/json') {
       return new Response(JSON.stringify(data), { headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
