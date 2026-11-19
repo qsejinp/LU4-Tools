@@ -2,7 +2,7 @@
 # LU4 한글패치: 게임 폴더에 한글패치가 있는지 확인하고, 없으면(런처 파일 확인으로 지워졌으면) 다시 넣은 뒤 런처를 켬
 #  -Watch : 윈도우 시작 때 뒤에서 켜 두는 모드. LU4 게임이 실행 중일 때만 사용 현황 신호를 보내고, 패치가 지워졌으면 알려 줌
 param([switch]$Watch)
-$Ver = '20261119.1912'
+$Ver = '20261119.1942'
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -63,8 +63,8 @@ function Find-Game([switch]$Ask) {
   if (Valid-Root $cfg.game) { return $cfg.game }
   $found = $null
   # 1) 켜져 있는 게임/런처의 위치
-  foreach ($pn in @($GameProc, 'EGlobalLauncher')) {
-    try { foreach ($p in @(Get-Process -Name $pn -ErrorAction SilentlyContinue)) { $r = Root-From (Split-Path $p.Path -Parent); if ($r) { $found = $r; break } } } catch {}
+  foreach ($pn in @('game', 'EGlobalLauncher')) {
+    try { foreach ($p in $(if ($pn -eq 'game') { Game-Procs } else { @(Get-Process -Name $pn -ErrorAction SilentlyContinue) })) { $r = Root-From (Split-Path $p.Path -Parent); if ($r) { $found = $r; break } } } catch {}
     if ($found) { break }
   }
   # 2) 바탕화면/시작 메뉴 바로가기
@@ -104,7 +104,9 @@ function Find-Game([switch]$Ask) {
   return $found
 }
 function Game-Ver($root) { try { $j = Get-Content (Join-Path $root 'UpdateVersion.json') -Raw -Encoding UTF8 | ConvertFrom-Json; return [int]$j.version } catch { return 0 } }   # 런처가 적어 두는 게임 버전
-function Game-Running { return [bool]@(Get-Process -Name $GameProc -ErrorAction SilentlyContinue).Count }
+# 게임 프로세스: 이름이 lu4 로 시작(lu4, lu4-win64-shipping 등). 'LU4 채팅 번역'처럼 띄어쓰기가 있는 우리 프로그램은 제외
+function Game-Procs { return @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match '^(?i)lu4([-_.][\w.\-]*)?$' }) }
+function Game-Running { return [bool](Game-Procs).Count }
 
 # ---------- 패치 목록(manifest) / 설치 여부 ----------
 function Get-Manifest {
@@ -227,12 +229,18 @@ if ($Watch) {
   Log ('기다리기 시작 ' + $Ver)
   Self-Update
   $was = $false; $lastPing = [DateTime]::MinValue; $lastUpd = [DateTime]::Now
+  $myTime = (Get-Item $PSCommandPath).LastWriteTimeUtc
   while ($true) {
     try {
+      # 프로그램 파일이 새로 바뀌었으면(아이콘을 눌러 업데이트된 경우) 새 버전으로 다시 켬
+      if ((Get-Item $PSCommandPath).LastWriteTimeUtc -ne $myTime) {
+        Log '프로그램이 바뀌어서 다시 켬'; try { $script:Mutex.ReleaseMutex() } catch {}; try { $script:Mutex.Dispose() } catch {}
+        Start-Process powershell -WindowStyle Hidden -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-WindowStyle', 'Hidden', '-File', ('"' + $PSCommandPath + '"'), '-Watch'); [Environment]::Exit(0)
+      }
       if (Game-Running) {
         $root = Find-Game
         if (-not $was) {
-          $was = $true; $lastPing = [DateTime]::MinValue
+          $was = $true; $lastPing = [DateTime]::MinValue; Log ('게임 켜짐: ' + ((Game-Procs | ForEach-Object { $_.ProcessName }) -join ', '))
           # 게임이 켜졌는데 한글패치가 없으면(런처 파일 확인으로 지워진 경우) 알려 줌
           if ($root) {
             $missing = $false
