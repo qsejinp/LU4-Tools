@@ -3,7 +3,7 @@
 // 저장하는 것: 무작위 번호, 프로그램 종류, 버전, 캐릭터 이름, 처음/마지막 신호 시각 (IP 등은 저장하지 않음)
 // 캐릭터 이름은 /json?key=비밀키 로만 볼 수 있음(비밀키는 Cloudflare의 Secret 변수 VIEW_KEY)
 
-const APPS = { chat: '채팅번역', meter: '사냥지표' };
+const APPS = { chat: '채팅번역', meter: '사냥지표', patch: '한글패치' };
 const LIVE_SEC = 600;              // 10분 안에 신호가 오면 실행 중
 const KST = 9 * 3600;              // 한국 시간 기준으로 "오늘"
 let ready = false;
