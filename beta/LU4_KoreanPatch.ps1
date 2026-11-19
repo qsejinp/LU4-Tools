@@ -2,7 +2,7 @@
 # LU4 한글패치: 게임 폴더에 한글패치가 있는지 확인하고, 없으면(런처 파일 확인으로 지워졌으면) 다시 넣은 뒤 런처를 켬
 #  -Watch : 윈도우 시작 때 뒤에서 켜 두는 모드. LU4 게임이 실행 중일 때만 사용 현황 신호를 보내고, 패치가 지워졌으면 알려 줌
 param([switch]$Watch)
-$Ver = '20261119.2001'
+$Ver = '20261119.2002'
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -39,7 +39,9 @@ function Self-Update {
     $new = Get-Text ($Raw + $Chan + 'LU4_KoreanPatch.ps1')
     if ($new.Length -lt 5000 -or $new -notmatch 'made by DoZ' -or $new -notmatch [regex]::Escape($rv)) { return }
     $new = $new.TrimStart([char]0xFEFF)
-    [System.IO.File]::WriteAllText($PSCommandPath, $new, (New-Object System.Text.UTF8Encoding $true))
+    # 숨김 파일은 바로 덮어쓸 수 없어서, 속성을 잠깐 풀고 쓴 뒤 다시 숨김
+    $fi = Get-Item $PSCommandPath -Force; $oldAttr = $fi.Attributes; $fi.Attributes = 'Normal'
+    try { [System.IO.File]::WriteAllText($PSCommandPath, $new, (New-Object System.Text.UTF8Encoding $true)) } finally { try { (Get-Item $PSCommandPath -Force).Attributes = $oldAttr } catch {} }
     Log ('프로그램 업데이트 ' + $Ver + ' -> ' + $rv)
     $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-WindowStyle', 'Hidden', '-File', ('"' + $PSCommandPath + '"')); if ($Watch) { $a += '-Watch' }
     if ($script:Mutex) { try { $script:Mutex.ReleaseMutex() } catch {}; try { $script:Mutex.Dispose() } catch {} }
