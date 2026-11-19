@@ -2,7 +2,7 @@
 # LU4 한글패치: 게임 폴더에 한글패치가 있는지 확인하고, 없으면(런처 파일 확인으로 지워졌으면) 다시 넣은 뒤 런처를 켬
 #  -Watch : 윈도우 시작 때 뒤에서 켜 두는 모드. LU4 게임이 실행 중일 때만 사용 현황 신호를 보내고, 패치가 지워졌으면 알려 줌
 param([switch]$Watch)
-$Ver = '20261119.1903'
+$Ver = '20261119.1912'
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -103,21 +103,25 @@ function Find-Game([switch]$Ask) {
   if ($found) { $cfg.game = $found; Save-Cfg; Log ('게임 폴더: ' + $found) }
   return $found
 }
+function Game-Ver($root) { try { $j = Get-Content (Join-Path $root 'UpdateVersion.json') -Raw -Encoding UTF8 | ConvertFrom-Json; return [int]$j.version } catch { return 0 } }   # 런처가 적어 두는 게임 버전
 function Game-Running { return [bool]@(Get-Process -Name $GameProc -ErrorAction SilentlyContinue).Count }
 
 # ---------- 패치 목록(manifest) / 설치 여부 ----------
 function Get-Manifest {
   $t = Get-Text ($Raw + 'patch/manifest.txt')
-  $m = @{ ver = ''; files = @() }
+  $m = @{ ver = ''; game = 0; files = @() }   # game: 이 패치가 맞는 게임 버전
   foreach ($ln in ($t -split "`n")) {
     $ln = $ln.Trim()
     if ($ln -match '^ver=(.+)$') { $m.ver = $Matches[1] }
+    elseif ($ln -match '^game=(\d+)$') { $m.game = [int]$Matches[1] }
     elseif ($ln -match '^file=([^|]+)\|(\d+)\|(\d+)\|([0-9A-Fa-f]{64})$') { $m.files += @{ name = $Matches[1]; size = [int64]$Matches[2]; parts = [int]$Matches[3]; sha = $Matches[4].ToUpper() } }
   }
   if (-not $m.files.Count) { throw '패치 목록을 읽지 못했어요.' }
   foreach ($f in $m.files) { if ($f.name -notmatch '^LU4-Korean[A-Za-z0-9_\-]*\.(pak|ucas|utoc)$') { throw '패치 목록이 이상해요.' } }
+  $script:PG = $m.game
   return $m
 }
+$script:PG = 0
 function Test-Installed($root, $m) {
   $pk = Paks-Of $root
   foreach ($f in $m.files) { $p = Join-Path $pk $f.name; if (-not (Test-Path $p) -or (Get-Item $p).Length -ne $f.size) { return $false } }
@@ -193,14 +197,15 @@ function Install-Patch($root, $m) {
 }
 
 # ---------- 사용 현황 신호 ----------
-function Send-Live {
+function Send-Live($root) {
   try {
+    $gv = $(if ($root) { Game-Ver $root } else { 0 })
     $idf = Join-Path $Data 'client_id.txt'; $id = ''
     if (Test-Path $idf) { $id = ([string](Get-Content $idf -TotalCount 1)).Trim() }
     if ($id -notmatch '^[a-f0-9]{32}$') { $id = [Guid]::NewGuid().ToString('N'); Set-Content -Path $idf -Value $id -Encoding ASCII }
     $nm = ''; try { $nf = Join-Path $Data 'char_name.txt'; if (Test-Path $nf) { $nm = ([string](Get-Content $nf -TotalCount 1 -Encoding UTF8)).Trim(); if ($nm -notmatch '^[A-Za-z0-9_가-힣]{2,24}$') { $nm = '' } } } catch {}
     $wc = New-Object System.Net.WebClient
-    try { [void]$wc.DownloadString(($LiveUrl + '?id=' + $id + '&app=patch&v=' + $Ver + '&n=' + [Uri]::EscapeDataString($nm) + '&t=' + [DateTime]::UtcNow.Ticks)) } finally { $wc.Dispose() }
+    try { [void]$wc.DownloadString(($LiveUrl + '?id=' + $id + '&app=patch&v=' + $Ver + '&g=' + $gv + '&pg=' + [int]$script:PG + '&n=' + [Uri]::EscapeDataString($nm) + '&t=' + [DateTime]::UtcNow.Ticks)) } finally { $wc.Dispose() }
   } catch {}
 }
 function Start-Watcher {
@@ -236,7 +241,7 @@ if ($Watch) {
           }
         }
         # 한글패치가 들어 있는 사람만 집계
-        if ($root -and (Has-AnyPatch $root) -and ([DateTime]::Now - $lastPing).TotalSeconds -ge 300) { Send-Live; $lastPing = [DateTime]::Now }
+        if ($root -and (Has-AnyPatch $root) -and ([DateTime]::Now - $lastPing).TotalSeconds -ge 300) { Send-Live $root; $lastPing = [DateTime]::Now }
       } else {
         $was = $false
         if (([DateTime]::Now - $lastUpd).TotalHours -ge 3) { $lastUpd = [DateTime]::Now; Self-Update }
@@ -261,11 +266,17 @@ try {
   } elseif (Test-Installed $root $man) { $note = '한글패치가 들어 있어요.' }
   else {
     if (Game-Running) { Msg "게임이 켜져 있어요.`n게임을 끄고 다시 눌러 주세요. (켜져 있을 때는 패치를 넣을 수 없어요)" 'OK' 'Warning' | Out-Null; exit }
-    try { Install-Patch $root $man } finally { Close-Progress }
-    $note = '한글패치를 넣었어요.'
+    # 게임이 업데이트돼서 올려 둔 패치와 게임 버전이 다르면 먼저 물어봄
+    $gv = Game-Ver $root; $go = $true
+    if ($man.game -gt 0 -and $gv -gt 0 -and $gv -ne $man.game) {
+      Log ('게임 버전 ' + $gv + ' / 패치는 ' + $man.game + '용')
+      $go = ((Msg "게임이 업데이트됐어요. 새 한글패치 작업 진행 중 입니다.`n그래도 예전 패치를 넣을까요?`n`n혹시 에러가 뜬다면 게임런처의 [파일확인] 누르시고 초기화하세요" 'YesNo' 'Warning') -eq 'Yes')
+    }
+    if ($go) { try { Install-Patch $root $man } finally { Close-Progress }; $note = '한글패치를 넣었어요.' }
+    else { $note = '한글패치를 넣지 않았어요. (새 패치 작업 중)' }
   }
   Start-Watcher
-  Send-Live
+  Send-Live $root
   # 런처 켜기(게임/런처가 이미 켜져 있으면 그대로 둠)
   $lch = Join-Path (Split-Path $root -Parent) 'EGlobalLauncher.exe'
   $started = $false

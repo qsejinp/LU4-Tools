@@ -14,6 +14,9 @@ async function init(db) {
     'CREATE TABLE IF NOT EXISTS pings (id TEXT NOT NULL, app TEXT NOT NULL, ver TEXT, first INTEGER, last INTEGER, PRIMARY KEY (id, app))'
   ).run();
   try { await db.prepare('ALTER TABLE pings ADD COLUMN name TEXT').run(); } catch (e) { /* 이미 있음 */ }
+  // 한글패치 프로그램이 알려 주는 게임 버전(gv)과, 올려 둔 패치가 맞는 게임 버전(pv)
+  try { await db.prepare('ALTER TABLE pings ADD COLUMN gv INTEGER').run(); } catch (e) { /* 이미 있음 */ }
+  try { await db.prepare('ALTER TABLE pings ADD COLUMN pv INTEGER').run(); } catch (e) { /* 이미 있음 */ }
   // 날짜별 사용 기록(한국 시간 날짜 번호): 어제/이번 주를 세기 위함
   await db.prepare('CREATE TABLE IF NOT EXISTS days (id TEXT NOT NULL, app TEXT NOT NULL, d INTEGER NOT NULL, PRIMARY KEY (id, app, d))').run();
   // 처음 한 번: 예전 기록(처음/마지막 신호 날짜)으로 채워 둠
@@ -37,13 +40,15 @@ export default {
       const ver = url.searchParams.get('v') || '';
       let name = (url.searchParams.get('n') || '').trim();
       if (!/^[A-Za-z0-9_\uAC00-\uD7A3]{2,24}$/.test(name)) name = '';
+      const num = k => { const v = url.searchParams.get(k) || ''; return /^\d{1,6}$/.test(v) ? parseInt(v, 10) : 0; };
+      const gv = num('g'), pv = num('pg');
       if (!/^[a-f0-9]{16,40}$/.test(id) || !(app in APPS) || (ver && !/^\d{8}\.\d{4}$/.test(ver))) {
         return new Response('bad', { status: 400 });
       }
       await env.DB.prepare(
-        'INSERT INTO pings (id, app, ver, first, last, name) VALUES (?1, ?2, ?3, ?4, ?4, ?5) ' +
-        "ON CONFLICT (id, app) DO UPDATE SET ver = ?3, last = ?4, name = CASE WHEN ?5 <> '' THEN ?5 ELSE name END"
-      ).bind(id, app, ver, now, name).run();
+        'INSERT INTO pings (id, app, ver, first, last, name, gv, pv) VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7) ' +
+        "ON CONFLICT (id, app) DO UPDATE SET ver = ?3, last = ?4, name = CASE WHEN ?5 <> '' THEN ?5 ELSE name END, gv = CASE WHEN ?6 > 0 THEN ?6 ELSE gv END, pv = CASE WHEN ?7 > 0 THEN ?7 ELSE pv END"
+      ).bind(id, app, ver, now, name, gv, pv).run();
       await env.DB.prepare('INSERT OR IGNORE INTO days (id, app, d) VALUES (?1, ?2, ?3)').bind(id, app, Math.floor((now + KST) / 86400)).run();
       return new Response('ok', { headers: { 'cache-control': 'no-store' } });
     }
@@ -63,6 +68,10 @@ export default {
     const data = {};
     for (const a in APPS) data[a] = { live: pick(live, a), today: pick(today, a), yday: pick(yday, a), week: pick(week, a), total: pick(total, a) };
     data.livePeople = people[0] ? people[0].n : 0;
+    // 게임 버전: 최근 7일 동안 한글패치 프로그램이 알려 준 값 중 가장 높은 것 / 올려 둔 패치가 맞는 게임 버전
+    const gm = await q("SELECT MAX(gv) g, MAX(pv) p FROM pings WHERE app = 'patch' AND last >= ?1", now - 7 * 86400);
+    data.game = { ver: (gm[0] && gm[0].g) || 0, patchFor: (gm[0] && gm[0].p) || 0 };
+    data.game.updated = data.game.ver > 0 && data.game.patchFor > 0 && data.game.ver !== data.game.patchFor;
     // 캐릭터 이름 목록: 비밀키가 맞을 때만
     const key = url.searchParams.get('key') || '';
     if (env.VIEW_KEY && key === env.VIEW_KEY) {
@@ -87,6 +96,7 @@ th{color:#aaa;font-weight:normal;font-size:13px}td:first-child{text-align:left}.
 <h1>LU4 Tools 사용 현황</h1>
 <p>지금 실행 중인 사람: <b style="font-size:22px;color:#6fd36f">${data.livePeople}명</b> <span class="sub">(두 프로그램 합쳐서, 같은 PC는 1명)</span></p>
 <table><tr><th>프로그램</th><th>지금</th><th>오늘</th><th>어제</th><th>이번 주</th><th>전체</th></tr>${rows}</table>
+${data.game.ver ? `<p class="sub" style="${data.game.updated ? 'color:#ff7a6a;font-weight:bold' : ''}">${data.game.updated ? '게임이 업데이트됨! ' : ''}게임 버전 ${data.game.ver} · 한글패치는 ${data.game.patchFor || '?'}용</p>` : ''}
 <p class="sub">지금 = 최근 10분 안에 신호가 온 PC · 오늘/어제/이번 주(월요일부터) = 한국 시간 기준 · 1분마다 자동 새로고침</p>
 <p class="sub">실행 중인 버전</p><ul>${vrows}</ul>
 <p class="sub">made by DoZ</p></body></html>`;
