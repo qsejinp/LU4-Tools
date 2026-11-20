@@ -2,7 +2,7 @@
 # LU4 한글패치: 게임 폴더에 한글패치가 있는지 확인하고, 없으면(런처 파일 확인으로 지워졌으면) 다시 넣은 뒤 런처를 켬
 #  -Watch : 윈도우 시작 때 뒤에서 켜 두는 모드. LU4 게임이 실행 중일 때만 사용 현황 신호를 보내고, 패치가 지워졌으면 알려 줌
 param([switch]$Watch)
-$Ver = '20261120.1347'
+$Ver = '20261121.0122'
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -215,10 +215,75 @@ function Send-Live($root) {
   try {
     $gv = $(if ($root) { Game-Ver $root } else { 0 })
     $id = Get-Id
-    $nm = ''; try { $nf = Join-Path $Data 'char_name.txt'; if (Test-Path $nf) { $nm = ([string](Get-Content $nf -TotalCount 1 -Encoding UTF8)).Trim(); if ($nm -notmatch '^[A-Za-z0-9_가-힣]{2,24}$') { $nm = '' } } } catch {}
+    $nm = ''; try { $nf = Join-Path $Data 'char_name.txt'; if (Test-Path $nf) { $nm = ([string](Get-Content $nf -TotalCount 1 -Encoding UTF8)).Trim(); if ($nm -notmatch '^[A-Za-z0-9_]{2,24}$') { $nm = '' } } } catch {}
     $wc = New-Object System.Net.WebClient
     try { [void]$wc.DownloadString(($LiveUrl + '?id=' + $id + '&app=patch&v=' + $Ver + '&g=' + $gv + '&pg=' + [int]$script:PG + '&n=' + [Uri]::EscapeDataString($nm) + '&t=' + [DateTime]::UtcNow.Ticks)) } finally { $wc.Dispose() }
   } catch {}
+}
+# ---------- 캐릭터 이름 확인(사용 현황용): 채팅번역·사냥지표를 안 쓰는 PC에서, 게임 창 왼쪽 위 상태창의 이름을 읽음 ----------
+$script:OcrEng = $null; $script:OcrTried = $false; $script:Clan = $null; $script:NameCand = ''
+function Known-Name { try { $nf = Join-Path $Data 'char_name.txt'; if (Test-Path $nf) { $n = ([string](Get-Content $nf -TotalCount 1 -Encoding UTF8)).Trim(); if ($n -match '^[A-Za-z0-9_]{2,24}$') { return $n } } } catch {}; return '' }
+function Init-Ocr {
+  if ($script:OcrTried) { return }; $script:OcrTried = $true
+  try {
+    Add-Type -AssemblyName System.Runtime.WindowsRuntime
+    Add-Type 'using System; using System.Runtime.InteropServices; public static class LU4K { [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; } [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L; public int T; public int R; public int B; } [DllImport("user32.dll")] public static extern bool SetProcessDPIAware(); [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow(); [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r); [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p); [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h); [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid); }'
+    [void][LU4K]::SetProcessDPIAware()
+    [void][Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime]
+    [void][Windows.Graphics.Imaging.BitmapDecoder, Windows.Foundation, ContentType = WindowsRuntime]
+    [void][Windows.Graphics.Imaging.SoftwareBitmap, Windows.Foundation, ContentType = WindowsRuntime]
+    [void][Windows.Globalization.Language, Windows.Foundation, ContentType = WindowsRuntime]
+    $script:AsTaskG = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
+    $e = $null
+    try { $e = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage([Windows.Globalization.Language]::new('en-US')) } catch {}
+    if (-not $e) { try { foreach ($lg in [Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages) { if ($lg.LanguageTag -like 'en*') { $e = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($lg); if ($e) { break } } } } catch {} }
+    if (-not $e) { $e = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages() }
+    $script:OcrEng = $e
+    # 혈맹원 명단(있으면 이름을 훨씬 정확히 고름)
+    try { $script:Clan = @((Get-Text ($Raw + 'clan_members.txt')) -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') -and $_ -match '^[A-Za-z0-9_]{2,24}$' }) } catch { $script:Clan = @() }
+    Log ('이름 읽기 준비: ' + $(if ($e) { '됨' } else { '글자 인식 없음' }) + ', 명단 ' + @($script:Clan).Count + '명')
+  } catch { Log ('이름 읽기 준비 실패: ' + $_.Exception.Message) }
+}
+function Aw($op, [Type]$t) { $task = $script:AsTaskG.MakeGenericMethod($t).Invoke($null, @($op)); [void]$task.Wait(15000); $task.Result }
+function Read-Name {
+  # 반환: @(이름, 확실한지)
+  Init-Ocr; if (-not $script:OcrEng) { return $null }
+  $h = [LU4K]::GetForegroundWindow(); if ($h -eq [IntPtr]::Zero -or [LU4K]::IsIconic($h)) { return $null }
+  $procId = [uint32]0; [void][LU4K]::GetWindowThreadProcessId($h, [ref]$procId)
+  try { if ((Get-Process -Id $procId -ErrorAction Stop).ProcessName -notmatch '^(?i)lu4[\w.\-]*$') { return $null } } catch { return $null }
+  $cr = New-Object LU4K+RECT; [void][LU4K]::GetClientRect($h, [ref]$cr); $p = New-Object LU4K+POINT; [void][LU4K]::ClientToScreen($h, [ref]$p)
+  $w = [int]($cr.R * 0.25); $hh = [int]($cr.B * 0.06); if ($w -lt 20 -or $hh -lt 10) { return $null }
+  $bmp = New-Object System.Drawing.Bitmap $w, $hh
+  $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($p.X, $p.Y, 0, 0, $bmp.Size); $g.Dispose()
+  $sc = [Math]::Max(1.0, [Math]::Min(4.0, 2400.0 / [Math]::Max($w, $hh)))
+  $big = New-Object System.Drawing.Bitmap ([int]($w * $sc)), ([int]($hh * $sc))
+  $g = [System.Drawing.Graphics]::FromImage($big); $g.InterpolationMode = 'HighQualityBicubic'; $g.DrawImage($bmp, 0, 0, $big.Width, $big.Height); $g.Dispose(); $bmp.Dispose()
+  $ms = New-Object System.IO.MemoryStream; $big.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); $big.Dispose(); $ms.Position = 0
+  $ras = [System.IO.WindowsRuntimeStreamExtensions]::AsRandomAccessStream($ms)
+  $dec = Aw ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($ras)) ([Windows.Graphics.Imaging.BitmapDecoder])
+  $sb = Aw ($dec.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+  $res = Aw ($script:OcrEng.RecognizeAsync($sb)) ([Windows.Media.Ocr.OcrResult])
+  $ms.Dispose()
+  $lines = @($res.Lines | ForEach-Object { [string]$_.Text })
+  $fold = { param($x) (($x -replace '[^A-Za-z0-9_]', '').ToLower() -replace '[il1|]', 'l' -replace '0', 'o') }
+  foreach ($ln in $lines) { foreach ($wd in ($ln -split '\s+')) { $k = & $fold $wd; if ($k.Length -lt 3) { continue }; foreach ($c in @($script:Clan)) { if ((& $fold $c) -eq $k) { return @($c, $true) } } } }
+  foreach ($ln in $lines) {
+    $t = ($ln -replace '[\[\]\(\)|]', '').Trim()
+    if ($t.Length -lt 3 -or $t.Length -gt 16 -or $t -match '\s' -or $t -match '[/%:.,+]' -or $t -match '^(?i)(HP|MP|CP|Lv|EXP|SP)\d*$') { continue }
+    $lt = ([regex]::Matches($t, '[A-Za-z]')).Count
+    if ($lt -ge 3 -and $lt -ge ([double]$t.Length) / 2) { return @(($t -replace '[^A-Za-z0-9_]', ''), $false) }
+  }
+  return $null
+}
+function Try-Name($root) {
+  if (Known-Name) { return }
+  try {
+    $r = Read-Name; if (-not $r -or -not $r[0]) { return }
+    # 명단에 있는 이름은 바로, 아니면 같은 이름이 두 번 연속 읽혔을 때만
+    if (-not $r[1]) { if ($script:NameCand -cne $r[0]) { $script:NameCand = $r[0]; return } }
+    Set-Content -Path (Join-Path $Data 'char_name.txt') -Value @($r[0], $(if ($r[1]) { 'sure' } else { 'ocr' })) -Encoding UTF8
+    Log ('이름 확인: ' + $r[0] + $(if ($r[1]) { ' (명단)' } else { '' })); Send-Live $root
+  } catch { Log ('이름 읽기 오류: ' + $_.Exception.Message) }
 }
 function Start-Watcher {
   # 뒤에서 기다리는 모드가 꺼져 있으면 켬
@@ -259,6 +324,7 @@ if ($Watch) {
             if ($missing -and -not (Is-Blocked)) { Log '게임 켜짐: 패치 없음'; Msg "한글패치가 없거나 새 패치가 나왔어요.`n(런처에서 파일 확인을 하면 지워져요)`n`n게임을 끄고 바탕화면의 'LU4 한글패치' 아이콘을 누르면 다시 넣어 줘요." 'OK' 'Warning' | Out-Null }
           }
         }
+        if ($root -and (Has-AnyPatch $root)) { Try-Name $root }   # 이름을 아직 모르면 상태창에서 읽어 봄
         # 한글패치가 들어 있는 사람만 집계
         if ($root -and (Has-AnyPatch $root) -and ([DateTime]::Now - $lastPing).TotalSeconds -ge 300) { Send-Live $root; $lastPing = [DateTime]::Now }
       } else {
