@@ -2,7 +2,7 @@
 # LU4 한글패치: 게임 폴더에 한글패치가 있는지 확인하고, 없으면(런처 파일 확인으로 지워졌으면) 다시 넣은 뒤 런처를 켬
 #  -Watch : 윈도우 시작 때 뒤에서 켜 두는 모드. LU4 게임이 실행 중일 때만 사용 현황 신호를 보내고, 패치가 지워졌으면 알려 줌
 param([switch]$Watch)
-$Ver = '20261120.2348'
+$Ver = '20261121.0108'
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -281,7 +281,7 @@ function Try-Name($root) {
     $r = Read-Name; if (-not $r -or -not $r[0]) { return }
     # 명단에 있는 이름은 바로, 아니면 같은 이름이 두 번 연속 읽혔을 때만
     if (-not $r[1]) { if ($script:NameCand -cne $r[0]) { $script:NameCand = $r[0]; return } }
-    Set-Content -Path (Join-Path $Data 'char_name.txt') -Value @($r[0], 'ocr') -Encoding UTF8
+    Set-Content -Path (Join-Path $Data 'char_name.txt') -Value @($r[0], $(if ($r[1]) { 'sure' } else { 'ocr' })) -Encoding UTF8
     Log ('이름 확인: ' + $r[0] + $(if ($r[1]) { ' (명단)' } else { '' })); Send-Live $root
   } catch { Log ('이름 읽기 오류: ' + $_.Exception.Message) }
 }
