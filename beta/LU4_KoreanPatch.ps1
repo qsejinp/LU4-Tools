@@ -2,7 +2,7 @@
 # LU4 한글패치: 게임 폴더에 한글패치가 있는지 확인하고, 없으면(런처 파일 확인으로 지워졌으면) 다시 넣은 뒤 런처를 켬
 #  -Watch : 윈도우 시작 때 뒤에서 켜 두는 모드. LU4 게임이 실행 중일 때만 사용 현황 신호를 보내고, 패치가 지워졌으면 알려 줌
 param([switch]$Watch)
-$Ver = '20261120.2332'
+$Ver = '20261120.2348'
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -215,14 +215,14 @@ function Send-Live($root) {
   try {
     $gv = $(if ($root) { Game-Ver $root } else { 0 })
     $id = Get-Id
-    $nm = ''; try { $nf = Join-Path $Data 'char_name.txt'; if (Test-Path $nf) { $nm = ([string](Get-Content $nf -TotalCount 1 -Encoding UTF8)).Trim(); if ($nm -notmatch '^[A-Za-z0-9_가-힣]{2,24}$') { $nm = '' } } } catch {}
+    $nm = ''; try { $nf = Join-Path $Data 'char_name.txt'; if (Test-Path $nf) { $nm = ([string](Get-Content $nf -TotalCount 1 -Encoding UTF8)).Trim(); if ($nm -notmatch '^[A-Za-z0-9_]{2,24}$') { $nm = '' } } } catch {}
     $wc = New-Object System.Net.WebClient
     try { [void]$wc.DownloadString(($LiveUrl + '?id=' + $id + '&app=patch&v=' + $Ver + '&g=' + $gv + '&pg=' + [int]$script:PG + '&n=' + [Uri]::EscapeDataString($nm) + '&t=' + [DateTime]::UtcNow.Ticks)) } finally { $wc.Dispose() }
   } catch {}
 }
 # ---------- 캐릭터 이름 확인(사용 현황용): 채팅번역·사냥지표를 안 쓰는 PC에서, 게임 창 왼쪽 위 상태창의 이름을 읽음 ----------
 $script:OcrEng = $null; $script:OcrTried = $false; $script:Clan = $null; $script:NameCand = ''
-function Known-Name { try { $nf = Join-Path $Data 'char_name.txt'; if (Test-Path $nf) { $n = ([string](Get-Content $nf -TotalCount 1 -Encoding UTF8)).Trim(); if ($n -match '^[A-Za-z0-9_가-힣]{2,24}$') { return $n } } } catch {}; return '' }
+function Known-Name { try { $nf = Join-Path $Data 'char_name.txt'; if (Test-Path $nf) { $n = ([string](Get-Content $nf -TotalCount 1 -Encoding UTF8)).Trim(); if ($n -match '^[A-Za-z0-9_]{2,24}$') { return $n } } } catch {}; return '' }
 function Init-Ocr {
   if ($script:OcrTried) { return }; $script:OcrTried = $true
   try {
