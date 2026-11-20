@@ -2,7 +2,7 @@
 # LU4 한글패치: 게임 폴더에 한글패치가 있는지 확인하고, 없으면(런처 파일 확인으로 지워졌으면) 다시 넣은 뒤 런처를 켬
 #  -Watch : 윈도우 시작 때 뒤에서 켜 두는 모드. LU4 게임이 실행 중일 때만 사용 현황 신호를 보내고, 패치가 지워졌으면 알려 줌
 param([switch]$Watch)
-$Ver = '20261119.2002'
+$Ver = '20261120.1347'
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -201,12 +201,20 @@ function Install-Patch($root, $m) {
 }
 
 # ---------- 사용 현황 신호 ----------
+function Get-Id {
+  $idf = Join-Path $Data 'client_id.txt'; $id = ''
+  if (Test-Path $idf) { $id = ([string](Get-Content $idf -TotalCount 1)).Trim() }
+  if ($id -notmatch '^[a-f0-9]{32}$') { $id = [Guid]::NewGuid().ToString('N'); Set-Content -Path $idf -Value $id -Encoding ASCII }
+  return $id
+}
+# 제작자가 이 PC를 차단했는지(서버에 못 물어보면 차단 아님으로 봄)
+function Is-Blocked {
+  try { $wc = New-Object System.Net.WebClient; try { return ($wc.DownloadString((($LiveUrl -replace '/ping$', '/check') + '?id=' + (Get-Id) + '&t=' + [DateTime]::UtcNow.Ticks)).Trim() -eq 'blocked') } finally { $wc.Dispose() } } catch { return $false }
+}
 function Send-Live($root) {
   try {
     $gv = $(if ($root) { Game-Ver $root } else { 0 })
-    $idf = Join-Path $Data 'client_id.txt'; $id = ''
-    if (Test-Path $idf) { $id = ([string](Get-Content $idf -TotalCount 1)).Trim() }
-    if ($id -notmatch '^[a-f0-9]{32}$') { $id = [Guid]::NewGuid().ToString('N'); Set-Content -Path $idf -Value $id -Encoding ASCII }
+    $id = Get-Id
     $nm = ''; try { $nf = Join-Path $Data 'char_name.txt'; if (Test-Path $nf) { $nm = ([string](Get-Content $nf -TotalCount 1 -Encoding UTF8)).Trim(); if ($nm -notmatch '^[A-Za-z0-9_가-힣]{2,24}$') { $nm = '' } } } catch {}
     $wc = New-Object System.Net.WebClient
     try { [void]$wc.DownloadString(($LiveUrl + '?id=' + $id + '&app=patch&v=' + $Ver + '&g=' + $gv + '&pg=' + [int]$script:PG + '&n=' + [Uri]::EscapeDataString($nm) + '&t=' + [DateTime]::UtcNow.Ticks)) } finally { $wc.Dispose() }
@@ -248,7 +256,7 @@ if ($Watch) {
           if ($root) {
             $missing = $false
             try { $missing = -not (Test-Installed $root (Get-Manifest)) } catch { $missing = -not (Has-AnyPatch $root) }
-            if ($missing) { Log '게임 켜짐: 패치 없음'; Msg "한글패치가 없거나 새 패치가 나왔어요.`n(런처에서 파일 확인을 하면 지워져요)`n`n게임을 끄고 바탕화면의 'LU4 한글패치' 아이콘을 누르면 다시 넣어 줘요." 'OK' 'Warning' | Out-Null }
+            if ($missing -and -not (Is-Blocked)) { Log '게임 켜짐: 패치 없음'; Msg "한글패치가 없거나 새 패치가 나왔어요.`n(런처에서 파일 확인을 하면 지워져요)`n`n게임을 끄고 바탕화면의 'LU4 한글패치' 아이콘을 누르면 다시 넣어 줘요." 'OK' 'Warning' | Out-Null }
           }
         }
         # 한글패치가 들어 있는 사람만 집계
@@ -267,6 +275,7 @@ if ($Watch) {
 # =====================================================================
 try {
   Self-Update
+  if (Is-Blocked) { Log '차단된 PC'; Msg '이 PC에서는 한글패치를 사용할 수 없어요.' 'OK' 'Warning' | Out-Null; exit }
   $root = Find-Game -Ask
   if (-not $root) { Msg '게임 폴더를 찾지 못해서 끝낼게요.' 'OK' 'Warning' | Out-Null; exit }
   $man = $null; $note = ''

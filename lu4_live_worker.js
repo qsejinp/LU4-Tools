@@ -22,6 +22,8 @@ async function init(db) {
   // 처음 한 번: 예전 기록(처음/마지막 신호 날짜)으로 채워 둠
   await db.prepare('INSERT OR IGNORE INTO days (id, app, d) SELECT id, app, CAST((last + ?1) / 86400 AS INTEGER) FROM pings').bind(KST).run();
   await db.prepare('INSERT OR IGNORE INTO days (id, app, d) SELECT id, app, CAST((first + ?1) / 86400 AS INTEGER) FROM pings').bind(KST).run();
+  // 차단한 PC(고유 번호): 한글패치를 새로 받거나 다시 넣지 못하게
+  await db.prepare('CREATE TABLE IF NOT EXISTS blocks (id TEXT PRIMARY KEY, t INTEGER)').run();
   ready = true;
 }
 
@@ -33,6 +35,21 @@ export default {
     const now = Math.floor(Date.now() / 1000);
     await init(env.DB);
 
+    const isBlocked = async id => !!(await env.DB.prepare('SELECT 1 x FROM blocks WHERE id = ?1').bind(id).first());
+    // 프로그램이 "이 PC가 차단됐는지" 물어봄
+    if (url.pathname === '/check') {
+      const id = url.searchParams.get('id') || '';
+      const b = /^[a-f0-9]{16,40}$/.test(id) && await isBlocked(id);
+      return new Response(b ? 'blocked' : 'ok', { headers: { 'cache-control': 'no-store' } });
+    }
+    // 차단/해제 (비밀키 필요): /block?key=…&id=…&on=1 또는 0
+    if (url.pathname === '/block') {
+      const id = url.searchParams.get('id') || '';
+      if (!env.VIEW_KEY || url.searchParams.get('key') !== env.VIEW_KEY || !/^[a-f0-9]{16,40}$/.test(id)) return new Response('no', { status: 403 });
+      if (url.searchParams.get('on') === '0') await env.DB.prepare('DELETE FROM blocks WHERE id = ?1').bind(id).run();
+      else await env.DB.prepare('INSERT OR REPLACE INTO blocks (id, t) VALUES (?1, ?2)').bind(id, now).run();
+      return new Response('ok', { headers: { 'cache-control': 'no-store' } });
+    }
     // 프로그램이 보내는 신호
     if (url.pathname === '/ping') {
       const id = url.searchParams.get('id') || '';
@@ -76,7 +93,10 @@ export default {
     const key = url.searchParams.get('key') || '';
     if (env.VIEW_KEY && key === env.VIEW_KEY) {
       const us = await q("SELECT id, MAX(COALESCE(name, '')) name, GROUP_CONCAT(app) apps, MAX(last) last FROM pings WHERE last >= ?1 GROUP BY id ORDER BY name", now - LIVE_SEC);
-      data.users = us.map(u => ({ name: u.name || '(이름 확인 전)', apps: String(u.apps || '').split(',').filter(a => a in APPS), ago: now - u.last }));
+      const bl = await q("SELECT b.id id, COALESCE((SELECT MAX(COALESCE(p.name, '')) FROM pings p WHERE p.id = b.id), '') name FROM blocks b ORDER BY b.t");
+      const bset = new Set(bl.map(b => b.id));
+      data.users = us.map(u => ({ id: u.id, name: u.name || '(이름 확인 전)', apps: String(u.apps || '').split(',').filter(a => a in APPS), ago: now - u.last, blocked: bset.has(u.id) }));
+      data.blocked = bl.map(b => ({ id: b.id, name: b.name || '(이름 확인 전)' }));
     }
 
     if (url.pathname === '/json') {
