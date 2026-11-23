@@ -2,7 +2,7 @@
 # LU4 한글패치: 게임 폴더에 한글패치가 있는지 확인하고, 없으면(런처 파일 확인으로 지워졌으면) 다시 넣은 뒤 런처를 켬
 #  -Watch : 윈도우 시작 때 뒤에서 켜 두는 모드. LU4 게임이 실행 중일 때만 사용 현황 신호를 보내고, 패치가 지워졌으면 알려 줌
 param([switch]$Watch)
-$Ver = '20261121.0122'
+$Ver = '20261123.1259'
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -14,6 +14,9 @@ $Cache = Join-Path $Data 'patch_cache'
 $LogPath = Join-Path $Data 'korean_patch.log'
 $Raw = 'https://raw.githubusercontent.com/qsejinp/LU4-Tools/main/'
 $Chan = $(if (Test-Path (Join-Path $Data 'beta.txt')) { 'beta/' } else { '' })   # 시험판 받는 PC
+# 패치 종류: 방송용(patch_channel.txt 에 bc)이면 대미지 표시·지도·피로시스템 변경을 뺀 패치를 받음
+$PDir = 'patch/'
+try { $pcf = Join-Path $Data 'patch_channel.txt'; if ((Test-Path $pcf) -and (([string](Get-Content $pcf -Raw -ErrorAction Stop)).Trim() -eq 'bc')) { $PDir = 'patch_bc/'; $Title = 'LU4 한글패치(방송용)' } } catch {}
 $GameProc = 'lu4-win64-shipping'
 $LiveUrl = 'https://lu4-live.lsj9351.workers.dev/ping'
 if (-not (Test-Path $Data)) { New-Item -ItemType Directory -Path $Data -Force | Out-Null }
@@ -112,13 +115,13 @@ function Game-Running { return [bool](Game-Procs).Count }
 
 # ---------- 패치 목록(manifest) / 설치 여부 ----------
 function Get-Manifest {
-  $t = Get-Text ($Raw + 'patch/manifest.txt')
+  $t = Get-Text ($Raw + $PDir + 'manifest.txt')
   $m = @{ ver = ''; game = 0; files = @() }   # game: 이 패치가 맞는 게임 버전
   foreach ($ln in ($t -split "`n")) {
     $ln = $ln.Trim()
     if ($ln -match '^ver=(.+)$') { $m.ver = $Matches[1] }
     elseif ($ln -match '^game=(\d+)$') { $m.game = [int]$Matches[1] }
-    elseif ($ln -match '^file=([^|]+)\|(\d+)\|(\d+)\|([0-9A-Fa-f]{64})$') { $m.files += @{ name = $Matches[1]; size = [int64]$Matches[2]; parts = [int]$Matches[3]; sha = $Matches[4].ToUpper() } }
+    elseif ($ln -match '^file=([^|]+)\|(\d+)\|(\d+)\|([0-9A-Fa-f]{64})(?:\|(patch|patch_bc))?$') { $fd = $PDir; if ($Matches[5]) { $fd = $Matches[5] + '/' }; $m.files += @{ name = $Matches[1]; size = [int64]$Matches[2]; parts = [int]$Matches[3]; sha = $Matches[4].ToUpper(); dir = $fd } }
   }
   if (-not $m.files.Count) { throw '패치 목록을 읽지 못했어요.' }
   foreach ($f in $m.files) { if ($f.name -notmatch '^LU4-Korean[A-Za-z0-9_\-]*\.(pak|ucas|utoc)$') { throw '패치 목록이 이상해요.' } }
@@ -167,7 +170,7 @@ function Install-Patch($root, $m) {
           $pp = $cf + ('.part{0:D2}' -f $i); if (Test-Path $pp) { Remove-Item $pp -Force }
           $wc = New-Object System.Net.WebClient
           try {
-            $wc.DownloadFileAsync([Uri]($Raw + 'patch/' + $f.name + ('.part{0:D2}' -f $i)), $pp)
+            $wc.DownloadFileAsync([Uri]($Raw + $f.dir + $f.name + ('.part{0:D2}' -f $i)), $pp)
             while ($wc.IsBusy) {
               $cur = [int64]0; try { if (Test-Path $pp) { $cur = (Get-Item $pp).Length } } catch {}
               $got = $done + $out.Length + $cur
