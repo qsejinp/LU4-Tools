@@ -3,7 +3,7 @@
 #  -Bc    : 방송용 아이콘으로 켠 경우. 대미지 표시·지도·피로시스템 변경을 뺀 패치를 넣음
 #  -Watch : 윈도우 시작 때 뒤에서 켜 두는 모드. LU4 게임이 실행 중일 때만 사용 현황 신호를 보내고, 패치가 지워졌으면 알려 줌
 param([switch]$Watch, [switch]$Bc)
-$Ver = '20261123.1307'
+$Ver = '20261124.0005'
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -234,7 +234,7 @@ function Send-Live($root) {
   } catch {}
 }
 # ---------- 캐릭터 이름 확인(사용 현황용): 채팅번역·사냥지표를 안 쓰는 PC에서, 게임 창 왼쪽 위 상태창의 이름을 읽음 ----------
-$script:OcrEng = $null; $script:OcrTried = $false; $script:Clan = $null; $script:NameCand = ''
+$script:OcrEng = $null; $script:OcrTried = $false; $script:Clan = $null; $script:NameSeen = @()
 function Known-Name { try { $nf = Join-Path $Data 'char_name.txt'; if (Test-Path $nf) { $n = ([string](Get-Content $nf -TotalCount 1 -Encoding UTF8)).Trim(); if ($n -match '^[A-Za-z0-9_]{2,24}$') { return $n } } } catch {}; return '' }
 function Init-Ocr {
   if ($script:OcrTried) { return }; $script:OcrTried = $true
@@ -268,24 +268,40 @@ function Read-Name {
   $w = [int]($cr.R * 0.25); $hh = [int]($cr.B * 0.06); if ($w -lt 20 -or $hh -lt 10) { return $null }
   $bmp = New-Object System.Drawing.Bitmap $w, $hh
   $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($p.X, $p.Y, 0, 0, $bmp.Size); $g.Dispose()
-  $sc = [Math]::Max(1.0, [Math]::Min(4.0, 2400.0 / [Math]::Max($w, $hh)))
-  $big = New-Object System.Drawing.Bitmap ([int]($w * $sc)), ([int]($hh * $sc))
-  $g = [System.Drawing.Graphics]::FromImage($big); $g.InterpolationMode = 'HighQualityBicubic'; $g.DrawImage($bmp, 0, 0, $big.Width, $big.Height); $g.Dispose(); $bmp.Dispose()
-  $ms = New-Object System.IO.MemoryStream; $big.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); $big.Dispose(); $ms.Position = 0
-  $ras = [System.IO.WindowsRuntimeStreamExtensions]::AsRandomAccessStream($ms)
-  $dec = Aw ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($ras)) ([Windows.Graphics.Imaging.BitmapDecoder])
-  $sb = Aw ($dec.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
-  $res = Aw ($script:OcrEng.RecognizeAsync($sb)) ([Windows.Media.Ocr.OcrResult])
-  $ms.Dispose()
-  $lines = @($res.Lines | ForEach-Object { [string]$_.Text })
   $fold = { param($x) (($x -replace '[^A-Za-z0-9_]', '').ToLower() -replace '[il1|]', 'l' -replace '0', 'o') }
-  foreach ($ln in $lines) { foreach ($wd in ($ln -split '\s+')) { $k = & $fold $wd; if ($k.Length -lt 3) { continue }; foreach ($c in @($script:Clan)) { if ((& $fold $c) -eq $k) { return @($c, $true) } } } }
-  foreach ($ln in $lines) {
-    $t = ($ln -replace '[\[\]\(\)|]', '').Trim()
-    if ($t.Length -lt 3 -or $t.Length -gt 16 -or $t -match '\s' -or $t -match '[/%:.,+]' -or $t -match '^(?i)(HP|MP|CP|Lv|EXP|SP)\d*$') { continue }
-    $lt = ([regex]::Matches($t, '[A-Za-z]')).Count
-    if ($lt -ge 3 -and $lt -ge ([double]$t.Length) / 2) { return @(($t -replace '[^A-Za-z0-9_]', ''), $false) }
-  }
+  try {
+    # 이름 줄만 좁게 자르면 잘 읽힘(게임 창의 가로 20%·세로 4%). 안 읽히면 더 좁게, 색을 뒤집어서, 마지막으로 예전 범위로
+    foreach ($v in @(@(0.20, 0.04, $false), @(0.15, 0.03, $false), @(0.20, 0.04, $true), @(0.25, 0.06, $true))) {
+      $cw = [Math]::Min($w, [int]($cr.R * $v[0])); $ch = [Math]::Min($hh, [int]($cr.B * $v[1])); if ($cw -lt 20 -or $ch -lt 8) { continue }
+      $sc = [Math]::Max(1.0, [Math]::Min(4.0, 2400.0 / [Math]::Max($cw, $ch)))
+      $big = New-Object System.Drawing.Bitmap ([int]($cw * $sc)), ([int]($ch * $sc))
+      $g = [System.Drawing.Graphics]::FromImage($big); $g.InterpolationMode = 'HighQualityBicubic'
+      $dst = New-Object System.Drawing.Rectangle 0, 0, $big.Width, $big.Height
+      if ($v[2]) {
+        # 흑백으로 바꾸고 뒤집음 (밝은 글자 -> 흰 바탕의 검은 글자)
+        $cm = New-Object System.Drawing.Imaging.ColorMatrix
+        $mx = @(@(-0.45, -0.45, -0.45, 0, 0), @(-0.9, -0.9, -0.9, 0, 0), @(-0.15, -0.15, -0.15, 0, 0), @(0, 0, 0, 1, 0), @(1.25, 1.25, 1.25, 0, 1))
+        for ($i = 0; $i -lt 5; $i++) { for ($j = 0; $j -lt 5; $j++) { $cm[$i, $j] = [single]$mx[$i][$j] } }
+        $ia = New-Object System.Drawing.Imaging.ImageAttributes; $ia.SetColorMatrix($cm)
+        $g.DrawImage($bmp, $dst, 0, 0, $cw, $ch, [System.Drawing.GraphicsUnit]::Pixel, $ia); $ia.Dispose()
+      } else { $g.DrawImage($bmp, $dst, 0, 0, $cw, $ch, [System.Drawing.GraphicsUnit]::Pixel) }
+      $g.Dispose()
+      $ms = New-Object System.IO.MemoryStream; $big.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); $big.Dispose(); $ms.Position = 0
+      $ras = [System.IO.WindowsRuntimeStreamExtensions]::AsRandomAccessStream($ms)
+      $dec = Aw ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($ras)) ([Windows.Graphics.Imaging.BitmapDecoder])
+      $sb = Aw ($dec.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+      $res = Aw ($script:OcrEng.RecognizeAsync($sb)) ([Windows.Media.Ocr.OcrResult])
+      $ms.Dispose()
+      $lines = @($res.Lines | ForEach-Object { [string]$_.Text })
+      foreach ($ln in $lines) { foreach ($wd in ($ln -split '\s+')) { $k = & $fold $wd; if ($k.Length -lt 3) { continue }; foreach ($c in @($script:Clan)) { if ((& $fold $c) -eq $k) { return @($c, $true) } } } }
+      foreach ($ln in $lines) {
+        $t = ($ln -replace '[\[\]\(\)|]', '').Trim()
+        if ($t.Length -lt 3 -or $t.Length -gt 16 -or $t -match '\s' -or $t -match '[/%:.,+]' -or $t -match '^(?i)(HP|MP|CP|Lv|EXP|SP)\d*$') { continue }
+        $lt = ([regex]::Matches($t, '[A-Za-z]')).Count
+        if ($lt -ge 3 -and $lt -ge ([double]$t.Length) / 2) { $nm = ($t -replace '[^A-Za-z0-9_]', ''); if ($nm.Length -ge 3) { return @($nm, $false) } }
+      }
+    }
+  } finally { $bmp.Dispose() }
   return $null
 }
 function Try-Name($root) {
@@ -293,9 +309,15 @@ function Try-Name($root) {
   try {
     $r = Read-Name; if (-not $r -or -not $r[0]) { return }
     # 명단에 있는 이름은 바로, 아니면 같은 이름이 두 번 연속 읽혔을 때만
-    if (-not $r[1]) { if ($script:NameCand -cne $r[0]) { $script:NameCand = $r[0]; return } }
-    Set-Content -Path (Join-Path $Data 'char_name.txt') -Value @($r[0], $(if ($r[1]) { 'sure' } else { 'ocr' })) -Encoding UTF8
-    Log ('이름 확인: ' + $r[0] + $(if ($r[1]) { ' (명단)' } else { '' })); Send-Live $root
+    $nm = [string]$r[0]
+    if (-not $r[1]) {
+      # 최근 6번 읽은 것 중 같은 이름(대소문자 무시)이 2번 나오면 확정. 대소문자는 더 많이 읽힌 쪽으로
+      $script:NameSeen = @(@($script:NameSeen) + $nm | Select-Object -Last 6)
+      $same = @($script:NameSeen | Where-Object { $_ -ieq $nm }); if ($same.Count -lt 2) { return }
+      $nm = [string](@($same | Group-Object -CaseSensitive | Sort-Object Count -Descending)[0].Name)
+    }
+    Set-Content -Path (Join-Path $Data 'char_name.txt') -Value @($nm, $(if ($r[1]) { 'sure' } else { 'ocr' })) -Encoding UTF8
+    Log ('이름 확인: ' + $nm + $(if ($r[1]) { ' (명단)' } else { '' })); Send-Live $root
   } catch { Log ('이름 읽기 오류: ' + $_.Exception.Message) }
 }
 function Start-Watcher {
@@ -308,7 +330,7 @@ function Start-Watcher {
 }
 
 # =====================================================================
-# 뒤에서 기다리는 모드: 30초마다 게임이 켜졌는지만 확인. 게임 중일 때만 신호(5분마다)
+# 뒤에서 기다리는 모드: 30초마다(이름을 모르는 처음 10분은 5초마다) 게임이 켜졌는지만 확인. 게임 중일 때만 신호(5분마다)
 # =====================================================================
 if ($Watch) {
   $created = $false
@@ -316,7 +338,7 @@ if ($Watch) {
   if (-not $created) { exit }
   Log ('기다리기 시작 ' + $Ver)
   Self-Update
-  $was = $false; $lastPing = [DateTime]::MinValue; $lastUpd = [DateTime]::Now
+  $was = $false; $lastPing = [DateTime]::MinValue; $lastUpd = [DateTime]::Now; $nameTries = 0
   trap { Log ('기다리기 중단: ' + $_.Exception.Message); break }
   $myTime = (Get-Item $PSCommandPath -Force).LastWriteTimeUtc
   while ($true) {
@@ -329,7 +351,7 @@ if ($Watch) {
       if (Game-Running) {
         $root = Find-Game
         if (-not $was) {
-          $was = $true; $lastPing = [DateTime]::MinValue; Log ('게임 켜짐: ' + ((Game-Procs | ForEach-Object { $_.ProcessName }) -join ', '))
+          $was = $true; $nameTries = 0; $lastPing = [DateTime]::MinValue; Log ('게임 켜짐: ' + ((Game-Procs | ForEach-Object { $_.ProcessName }) -join ', '))
           # 게임이 켜졌는데 한글패치가 없으면(런처 파일 확인으로 지워진 경우) 알려 줌
           if ($root) {
             $missing = $false
@@ -345,7 +367,9 @@ if ($Watch) {
         if (([DateTime]::Now - $lastUpd).TotalHours -ge 3) { $lastUpd = [DateTime]::Now; Self-Update }
       }
     } catch { Log ('기다리기 오류: ' + $_.Exception.Message) }
-    Start-Sleep -Seconds 30
+    # 게임이 켜져 있고 이름을 아직 모르면 처음 10분은 5초마다 읽어 봄. 그 밖에는 30초마다
+    $fast = $false; try { $fast = $was -and $nameTries -lt 120 -and -not (Known-Name) } catch {}
+    if ($fast) { $nameTries++; Start-Sleep -Seconds 5 } else { Start-Sleep -Seconds 30 }
   }
 }
 
