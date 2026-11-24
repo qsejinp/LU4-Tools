@@ -3,7 +3,7 @@
 #  -Bc    : 방송용 아이콘으로 켠 경우. 대미지 표시·지도·피로시스템 변경을 뺀 패치를 넣음
 #  -Watch : 윈도우 시작 때 뒤에서 켜 두는 모드. LU4 게임이 실행 중일 때만 사용 현황 신호를 보내고, 패치가 지워졌으면 알려 줌
 param([switch]$Watch, [switch]$Bc)
-$Ver = '20261124.0945'
+$Ver = '20261124.1050'
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -274,7 +274,7 @@ function Ocr-Lines($bmp, $eng) {
   } finally { $ms.Dispose() }
 }
 function Read-Name {
-  # 반환: @(이름, 확실한지, 어떻게 알았는지)
+  # 반환: @(이름, 확실한지, 어떻게 알았는지, 믿을 만한 정도 0~2)   2 = 두 곳이 같거나, 시스템 창에 5번 이상, 또는 상태창에서 이 PC 캐릭터 이름
   # 두 군데를 읽어서 맞춰 봄: 1) 화면 왼쪽 위 상태창의 이름 줄  2) 시스템 창의 사냥 줄에 여러 번 나오는 내 이름
   # 둘이 같으면 바로 확정. 하나만 읽히거나 서로 다르면 더 믿을 만한 쪽을 후보로(같은 이름이 다시 읽혀야 확정)
   Init-Ocr; if (-not $script:OcrEng) { return $null }
@@ -361,20 +361,36 @@ function Read-Name {
   # 3) 두 결과를 맞춰 봄
   $nmA = @{ own = '상태창(이 PC 캐릭터)'; clan = '상태창(명단)'; guess = '상태창' }; $nmB = @{ own = '시스템 창(이 PC 캐릭터)'; sys = '시스템 창 사냥 줄' }
   if ($a -and $b) {
-    if ((& $fold $a) -eq (& $fold $b)) { return @($(if ($aKind -eq 'guess' -and $bKind -eq 'own') { $b } else { $a }), $true, ($nmA[$aKind] + ' = ' + $nmB[$bKind])) }
-    if ($aKind -eq 'own') { return @($a, $true, ($nmA[$aKind] + ' (화면 쪽은 ' + $b + ')')) }
-    return @($b, ($aKind -eq 'guess' -and $bN -ge 5), ($nmB[$bKind] + ' ' + $bN + '번 (상태창 쪽은 ' + $a + ')'))
+    if ((& $fold $a) -eq (& $fold $b)) { return @($(if ($aKind -eq 'guess' -and $bKind -eq 'own') { $b } else { $a }), $true, ($nmA[$aKind] + ' = ' + $nmB[$bKind]), 2) }
+    if ($aKind -eq 'own') { return @($a, $true, ($nmA[$aKind] + ' (화면 쪽은 ' + $b + ')'), 2) }
+    return @($b, ($bN -ge 5), ($nmB[$bKind] + ' ' + $bN + '번 (상태창 쪽은 ' + $a + ')'), $(if ($bN -ge 5) { 2 } else { 0 }))
   }
-  if ($a) { return @($a, ($aKind -ne 'guess'), $nmA[$aKind]) }
+  if ($a) { return @($a, ($aKind -ne 'guess'), $nmA[$aKind], $(if ($aKind -eq 'own') { 2 } elseif ($aKind -eq 'clan') { 1 } else { 0 })) }
   # 상태창을 못 읽어도, 시스템 창에 같은 이름이 5번 이상 나오면 그것만으로 바로 확정
-  if ($b) { return @($b, ($bN -ge 5), ($nmB[$bKind] + ' ' + $bN + '번')) }
+  if ($b) { return @($b, ($bN -ge 5), ($nmB[$bKind] + ' ' + $bN + '번'), $(if ($bN -ge 5) { 2 } else { 0 })) }
   return $null
 }
+$script:SwapCand = ''; $script:SwapN = 0; $script:KnownTick = 0
 function Try-Name($root) {
-  if (Known-Name) { return }
   try {
+    $known = Known-Name
+    if ($known) {
+      # 이름을 이미 아는 경우: 게임 중에 다른 캐릭터로 바꿨는지 2분에 한 번 확인
+      # 믿을 만하게(두 곳이 같거나 시스템 창에 5번 이상) 다른 이름이 두 번 이어서 읽히면 그 이름으로 바꿈
+      $script:KnownTick++; if ($script:KnownTick % 4 -ne 0) { return }
+      $r = Read-Name; if (-not $r -or -not $r[0]) { return }
+      $fk = { param($x) ((([string]$x) -replace '[^A-Za-z0-9_]', '').ToLower() -replace '[il1|]', 'l' -replace '0', 'o') }
+      if ((& $fk $r[0]) -eq (& $fk $known)) { $script:SwapCand = ''; $script:SwapN = 0; return }
+      if ([int]$r[3] -lt 2) { return }
+      if ((& $fk $script:SwapCand) -eq (& $fk $r[0])) { $script:SwapN++ } else { $script:SwapCand = [string]$r[0]; $script:SwapN = 1 }
+      if ($script:SwapN -lt 2) { return }
+      $nm = [string]$r[0]
+      Set-Content -Path (Join-Path $Data 'char_name.txt') -Value @($nm, 'sure') -Encoding UTF8
+      Log ('캐릭터 바뀜: ' + $known + ' -> ' + $nm + ' / ' + [string]$r[2]); $script:SwapCand = ''; $script:SwapN = 0; Send-Live $root
+      return
+    }
     $r = Read-Name; if (-not $r -or -not $r[0]) { return }
-    # 명단에 있는 이름은 바로, 아니면 같은 이름이 두 번 연속 읽혔을 때만
+    # 확실하면 바로, 아니면 같은 이름이 다시 읽혔을 때만
     $nm = [string]$r[0]
     if (-not $r[1]) {
       # 최근 6번 읽은 것 중 같은 이름(대소문자 무시)이 2번 나오면 확정. 대소문자는 더 많이 읽힌 쪽으로
