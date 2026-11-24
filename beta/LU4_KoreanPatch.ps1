@@ -3,7 +3,7 @@
 #  -Bc    : 방송용 아이콘으로 켠 경우. 대미지 표시·지도·피로시스템 변경을 뺀 패치를 넣음
 #  -Watch : 윈도우 시작 때 뒤에서 켜 두는 모드. LU4 게임이 실행 중일 때만 사용 현황 신호를 보내고, 패치가 지워졌으면 알려 줌
 param([switch]$Watch, [switch]$Bc)
-$Ver = '20261124.1110'
+$Ver = '20261124.1340'
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing

@@ -3,7 +3,7 @@
 #  -Bc    : 방송용 아이콘으로 켠 경우. 대미지 표시·지도·피로시스템 변경을 뺀 패치를 넣음
 #  -Watch : 윈도우 시작 때 뒤에서 켜 두는 모드. LU4 게임이 실행 중일 때만 사용 현황 신호를 보내고, 패치가 지워졌으면 알려 줌
 param([switch]$Watch, [switch]$Bc)
-$Ver = '20261124.0945'
+$Ver = '20261124.1340'
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -228,9 +228,10 @@ function Send-Live($root) {
   try {
     $gv = $(if ($root) { Game-Ver $root } else { 0 })
     $id = Get-Id
+    try { if (Get-Command Prune-Names -ErrorAction SilentlyContinue) { Prune-Names } } catch {}
     $nm = ''; try { $nf = Join-Path $Data 'char_name.txt'; if (Test-Path $nf) { $nm = ([string](Get-Content $nf -TotalCount 1 -Encoding UTF8)).Trim(); if ($nm -notmatch '^[A-Za-z0-9_]{2,24}$') { $nm = '' } } } catch {}
     $wc = New-Object System.Net.WebClient
-    try { [void]$wc.DownloadString(($LiveUrl + '?id=' + $id + '&app=patch&v=' + $Ver + '&g=' + $gv + '&pg=' + [int]$script:PG + '&n=' + [Uri]::EscapeDataString($nm) + '&t=' + [DateTime]::UtcNow.Ticks)) } finally { $wc.Dispose() }
+    try { [void]$wc.DownloadString(($LiveUrl + '?id=' + $id + '&app=patch&v=' + $Ver + '&g=' + $gv + '&pg=' + [int]$script:PG + '&n=' + [Uri]::EscapeDataString($nm) + $(if (@($script:AllNames).Count -gt 1) { '&ns=' + [Uri]::EscapeDataString((@($script:AllNames | Select-Object -First 4) -join ',')) } else { '' }) + '&t=' + [DateTime]::UtcNow.Ticks)) } finally { $wc.Dispose() }
   } catch {}
 }
 # ---------- 캐릭터 이름 확인(사용 현황용): 채팅번역·사냥지표를 안 쓰는 PC에서, 게임 창 왼쪽 위 상태창의 이름을 읽음 ----------
@@ -274,13 +275,14 @@ function Ocr-Lines($bmp, $eng) {
   } finally { $ms.Dispose() }
 }
 function Read-Name {
-  # 반환: @(이름, 확실한지, 어떻게 알았는지)
+  # 반환: @(이름, 확실한지, 어떻게 알았는지, 믿을 만한 정도 0~2)   2 = 두 곳이 같거나, 시스템 창에 5번 이상, 또는 상태창에서 이 PC 캐릭터 이름
   # 두 군데를 읽어서 맞춰 봄: 1) 화면 왼쪽 위 상태창의 이름 줄  2) 시스템 창의 사냥 줄에 여러 번 나오는 내 이름
   # 둘이 같으면 바로 확정. 하나만 읽히거나 서로 다르면 더 믿을 만한 쪽을 후보로(같은 이름이 다시 읽혀야 확정)
   Init-Ocr; if (-not $script:OcrEng) { return $null }
   $h = [LU4K]::GetForegroundWindow(); if ($h -eq [IntPtr]::Zero -or [LU4K]::IsIconic($h)) { return $null }
   $procId = [uint32]0; [void][LU4K]::GetWindowThreadProcessId($h, [ref]$procId)
   try { if ((Get-Process -Id $procId -ErrorAction Stop).ProcessName -notmatch '^(?i)lu4[\w.\-]*$') { return $null } } catch { return $null }
+  $script:NamePid = [int]$procId
   $cr = New-Object LU4K+RECT; [void][LU4K]::GetClientRect($h, [ref]$cr); $p = New-Object LU4K+POINT; [void][LU4K]::ClientToScreen($h, [ref]$p)
   if ($cr.R -lt 200 -or $cr.B -lt 150) { return $null }
   $fold = { param($x) (($x -replace '[^A-Za-z0-9_]', '').ToLower() -replace '[il1|]', 'l' -replace '0', 'o') }
@@ -361,29 +363,82 @@ function Read-Name {
   # 3) 두 결과를 맞춰 봄
   $nmA = @{ own = '상태창(이 PC 캐릭터)'; clan = '상태창(명단)'; guess = '상태창' }; $nmB = @{ own = '시스템 창(이 PC 캐릭터)'; sys = '시스템 창 사냥 줄' }
   if ($a -and $b) {
-    if ((& $fold $a) -eq (& $fold $b)) { return @($(if ($aKind -eq 'guess' -and $bKind -eq 'own') { $b } else { $a }), $true, ($nmA[$aKind] + ' = ' + $nmB[$bKind])) }
-    if ($aKind -eq 'own') { return @($a, $true, ($nmA[$aKind] + ' (화면 쪽은 ' + $b + ')')) }
-    return @($b, ($aKind -eq 'guess' -and $bN -ge 5), ($nmB[$bKind] + ' ' + $bN + '번 (상태창 쪽은 ' + $a + ')'))
+    if ((& $fold $a) -eq (& $fold $b)) { return @($(if ($aKind -eq 'guess' -and $bKind -eq 'own') { $b } else { $a }), $true, ($nmA[$aKind] + ' = ' + $nmB[$bKind]), 2) }
+    if ($aKind -eq 'own') { return @($a, $true, ($nmA[$aKind] + ' (화면 쪽은 ' + $b + ')'), 2) }
+    return @($b, ($bN -ge 5), ($nmB[$bKind] + ' ' + $bN + '번 (상태창 쪽은 ' + $a + ')'), $(if ($bN -ge 5) { 2 } else { 0 }))
   }
-  if ($a) { return @($a, ($aKind -ne 'guess'), $nmA[$aKind]) }
+  if ($a) { return @($a, ($aKind -ne 'guess'), $nmA[$aKind], $(if ($aKind -eq 'own') { 2 } elseif ($aKind -eq 'clan') { 1 } else { 0 })) }
   # 상태창을 못 읽어도, 시스템 창에 같은 이름이 5번 이상 나오면 그것만으로 바로 확정
-  if ($b) { return @($b, ($bN -ge 5), ($nmB[$bKind] + ' ' + $bN + '번')) }
+  if ($b) { return @($b, ($bN -ge 5), ($nmB[$bKind] + ' ' + $bN + '번'), $(if ($bN -ge 5) { 2 } else { 0 })) }
   return $null
 }
-function Try-Name($root) {
-  if (Known-Name) { return }
+# 게임 창마다(프로세스 번호별로) 이름을 따로 기억함: 게임을 다시 켜면 새 창이라 다시 확인하고, 창을 두 개 켜면 둘 다 알 수 있음
+$script:NamePid = 0; $script:WinName = @{}; $script:WinCand = @{}; $script:WinTick = @{}; $script:AllNames = @()
+function Game-WinPids { return @(Game-Procs | Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero } | ForEach-Object { [string]$_.Id }) }
+# 맨 앞 창이 게임이면 그 프로세스 번호, 아니면 0
+function Fg-GamePid {
   try {
-    $r = Read-Name; if (-not $r -or -not $r[0]) { return }
-    # 명단에 있는 이름은 바로, 아니면 같은 이름이 두 번 연속 읽혔을 때만
-    $nm = [string]$r[0]
+    Init-Ocr; if (-not $script:OcrEng) { return 0 }
+    $h = [LU4K]::GetForegroundWindow(); if ($h -eq [IntPtr]::Zero -or [LU4K]::IsIconic($h)) { return 0 }
+    $fp = [uint32]0; [void][LU4K]::GetWindowThreadProcessId($h, [ref]$fp)
+    if ((Get-Process -Id $fp -ErrorAction Stop).ProcessName -match '^(?i)lu4[\w.\-]*$') { return [int]$fp }
+  } catch {}
+  return 0
+}
+# 이름을 아직 모르는 게임 창이 있는지(있으면 처음 10분은 5초마다 읽어 봄)
+function Need-Name { try { foreach ($k in (Game-WinPids)) { if (-not $script:WinName.ContainsKey($k)) { return $true } } } catch {}; return $false }
+# 확정된 이름을 저장하고 알림: char_name.txt = 지금 맨 앞 창의 이름, 모든 창의 이름은 함께 보냄
+function Publish-Name($root, $key, $nm, $src, $why) {
+  $script:WinName[$key] = $nm; [void]$script:WinCand.Remove($key)
+  Set-Content -Path (Join-Path $Data 'char_name.txt') -Value @($nm, $src) -Encoding UTF8
+  Prune-Names
+  Log ($why + $(if ($script:AllNames.Count -gt 1) { ' / 켜 둔 캐릭터: ' + ($script:AllNames -join ', ') } else { '' }))
+  Send-Live $root
+}
+# 꺼진 게임 창의 이름은 지움
+function Prune-Names {
+  try {
+    $live = @(Game-WinPids)
+    foreach ($k in @($script:WinName.Keys)) { if ($live -notcontains $k) { [void]$script:WinName.Remove($k); [void]$script:WinTick.Remove($k); [void]$script:WinCand.Remove($k) } }
+    $first = Known-Name
+    $script:AllNames = @(@($script:WinName.Values | Where-Object { $_ -ceq $first }) + @($script:WinName.Values | Where-Object { $_ -cne $first }) | Select-Object -Unique)
+  } catch {}
+}
+function Try-Name($root) {
+  try {
+    $fp = Fg-GamePid; if (-not $fp) { return }
+    $key = [string]$fp
+    $fk = { param($x) ((([string]$x) -replace '[^A-Za-z0-9_]', '').ToLower() -replace '[il1|]', 'l' -replace '0', 'o') }
+    $known = [string]$script:WinName[$key]
+    if ($known) {
+      # 이 창의 이름을 이미 아는 경우: 게임 안에서 다른 캐릭터로 바꿨는지 2분에 한 번 확인
+      # 믿을 만하게(두 곳이 같거나 시스템 창에 5번 이상) 다른 이름이 두 번 이어서 읽히면 그 이름으로 바꿈
+      $script:WinTick[$key] = 1 + [int]$script:WinTick[$key]; if ($script:WinTick[$key] % 4 -ne 0) { return }
+      $r = Read-Name; if (-not $r -or -not $r[0] -or $script:NamePid -ne $fp) { return }
+      if ((& $fk $r[0]) -eq (& $fk $known)) { [void]$script:WinCand.Remove($key); return }
+      if ([int]$r[3] -lt 2) { return }
+      $c = $script:WinCand[$key]
+      if ($c -and (& $fk $c.c) -eq (& $fk $r[0])) { $c.n++ } else { $c = @{ c = [string]$r[0]; n = 1; seen = @() }; $script:WinCand[$key] = $c }
+      if ($c.n -lt 2) { return }
+      Publish-Name $root $key ([string]$r[0]) 'sure' ('캐릭터 바뀜: ' + $known + ' -> ' + [string]$r[0] + ' / ' + [string]$r[2])
+      return
+    }
+    # 이 창의 이름을 아직 모름(게임을 새로 켰거나, 두 번째 창)
+    $r = Read-Name; if (-not $r -or -not $r[0] -or $script:NamePid -ne $fp) { return }
+    $nm = [string]$r[0]; $hint = Known-Name
+    $used = @($script:WinName.Values | ForEach-Object { & $fk $_ })   # 다른 창이 이미 쓰는 이름
+    if ($hint -and (& $fk $nm) -eq (& $fk $hint) -and $used -notcontains (& $fk $hint)) {
+      # 지난번에 저장된 이름과 같음 -> 바로 확정(저장된 표기 그대로)
+      Publish-Name $root $key $hint 'sure' ('이름 확인: ' + $hint + ' / 지난번과 같음, ' + [string]$r[2]); return
+    }
     if (-not $r[1]) {
-      # 최근 6번 읽은 것 중 같은 이름(대소문자 무시)이 2번 나오면 확정. 대소문자는 더 많이 읽힌 쪽으로
-      $script:NameSeen = @(@($script:NameSeen) + $nm | Select-Object -Last 6)
-      $same = @($script:NameSeen | Where-Object { $_ -ieq $nm }); if ($same.Count -lt 2) { return }
+      # 확실하지 않으면: 이 창에서 최근 6번 읽은 것 중 같은 이름(대소문자 무시)이 2번 나오면 확정. 대소문자는 더 많이 읽힌 쪽으로
+      $c = $script:WinCand[$key]; if (-not $c) { $c = @{ c = ''; n = 0; seen = @() }; $script:WinCand[$key] = $c }
+      $c.seen = @(@($c.seen) + $nm | Select-Object -Last 6)
+      $same = @($c.seen | Where-Object { $_ -ieq $nm }); if ($same.Count -lt 2) { return }
       $nm = [string](@($same | Group-Object -CaseSensitive | Sort-Object Count -Descending)[0].Name)
     }
-    Set-Content -Path (Join-Path $Data 'char_name.txt') -Value @($nm, $(if ($r[1]) { 'sure' } else { 'ocr' })) -Encoding UTF8
-    Log ('이름 확인: ' + $nm + ' / ' + [string]$r[2] + $(if ($r[1]) { '' } else { ' (두 번 읽힘)' })); Send-Live $root
+    Publish-Name $root $key $nm $(if ($r[1]) { 'sure' } else { 'ocr' }) ('이름 확인: ' + $nm + ' / ' + [string]$r[2] + $(if ($r[1]) { '' } else { ' (두 번 읽힘)' }))
   } catch { Log ('이름 읽기 오류: ' + $_.Exception.Message) }
 }
 function Start-Watcher {
@@ -437,7 +492,7 @@ if ($Watch) {
       }
     } catch { Log ('기다리기 오류: ' + $_.Exception.Message) }
     # 게임이 켜져 있고 이름을 아직 모르면 처음 10분은 5초마다 읽어 봄. 그 밖에는 30초마다
-    $fast = $false; try { $fast = $was -and $nameTries -lt 120 -and -not (Known-Name) } catch {}
+    $fast = $false; try { $fast = $was -and $nameTries -lt 120 -and (Need-Name) } catch {}
     if ($fast) { $nameTries++; Start-Sleep -Seconds 5 } else { Start-Sleep -Seconds 30 }
   }
 }
