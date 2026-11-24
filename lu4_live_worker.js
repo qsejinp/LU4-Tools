@@ -1,6 +1,6 @@
 // LU4 Tools 실행 중인 사람 세기 (Cloudflare Worker + D1)  - made by DoZ
 // 프로그램이 5분마다 /ping 으로 무작위 번호를 보내면, 최근 10분 안에 보낸 번호를 "지금 실행 중"으로 셉니다.
-// 저장하는 것: 무작위 번호, 프로그램 종류, 버전, 캐릭터 이름, 처음/마지막 신호 시각 (IP 등은 저장하지 않음)
+// 저장하는 것: 무작위 번호, 프로그램 종류, 버전, 캐릭터 이름(게임 창을 여러 개 켜면 여러 개), 처음/마지막 신호 시각 (IP 등은 저장하지 않음)
 // 캐릭터 이름은 /json?key=비밀키 로만 볼 수 있음(비밀키는 Cloudflare의 Secret 변수 VIEW_KEY)
 
 const APPS = { chat: '채팅번역', meter: '사냥지표', patch: '한글패치' };
@@ -57,6 +57,9 @@ export default {
       const ver = url.searchParams.get('v') || '';
       let name = (url.searchParams.get('n') || '').trim();
       if (!/^[A-Za-z0-9_\uAC00-\uD7A3]{2,24}$/.test(name)) name = '';
+      // 게임 창을 여러 개 켠 PC: ns=이름1,이름2 (최대 4개) -> "이름1, 이름2"로 저장
+      const names = (url.searchParams.get('ns') || '').split(',').map(x => x.trim()).filter(x => /^[A-Za-z0-9_\uAC00-\uD7A3]{2,24}$/.test(x)).slice(0, 4);
+      if (names.length > 1) name = names.join(', ');
       const num = k => { const v = url.searchParams.get(k) || ''; return /^\d{1,6}$/.test(v) ? parseInt(v, 10) : 0; };
       const gv = num('g'), pv = num('pg');
       if (!/^[a-f0-9]{16,40}$/.test(id) || !(app in APPS) || (ver && !/^\d{8}\.\d{4}$/.test(ver))) {
@@ -92,7 +95,10 @@ export default {
     // 캐릭터 이름 목록: 비밀키가 맞을 때만
     const key = url.searchParams.get('key') || '';
     if (env.VIEW_KEY && key === env.VIEW_KEY) {
-      const us = await q("SELECT id, MAX(COALESCE(name, '')) name, GROUP_CONCAT(app) apps, MAX(last) last FROM pings WHERE last >= ?1 GROUP BY id ORDER BY name", now - LIVE_SEC);
+      // 같은 PC가 프로그램마다 이름을 따로 보냄 -> 가장 긴 것(여러 캐릭터가 적힌 것)을 씀
+      const us = (await q("SELECT id, GROUP_CONCAT(COALESCE(name, ''), '|') names, GROUP_CONCAT(app) apps, MAX(last) last FROM pings WHERE last >= ?1 GROUP BY id", now - LIVE_SEC))
+        .map(u => ({ ...u, name: String(u.names || '').split('|').sort((x, y) => y.length - x.length)[0] || '' }))
+        .sort((x, y) => x.name.localeCompare(y.name));
       const bl = await q("SELECT b.id id, COALESCE((SELECT MAX(COALESCE(p.name, '')) FROM pings p WHERE p.id = b.id), '') name FROM blocks b ORDER BY b.t");
       const bset = new Set(bl.map(b => b.id));
       data.users = us.map(u => ({ id: u.id, name: u.name || '(이름 확인 전)', apps: String(u.apps || '').split(',').filter(a => a in APPS), ago: now - u.last, blocked: bset.has(u.id) }));
