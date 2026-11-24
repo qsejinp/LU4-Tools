@@ -3,7 +3,7 @@
 #  -Bc    : 방송용 아이콘으로 켠 경우. 대미지 표시·지도·피로시스템 변경을 뺀 패치를 넣음
 #  -Watch : 윈도우 시작 때 뒤에서 켜 두는 모드. LU4 게임이 실행 중일 때만 사용 현황 신호를 보내고, 패치가 지워졌으면 알려 줌
 param([switch]$Watch, [switch]$Bc)
-$Ver = '20261124.1340'
+$Ver = '20261124.1900'
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -400,8 +400,14 @@ function Prune-Names {
   try {
     $live = @(Game-WinPids)
     foreach ($k in @($script:WinName.Keys)) { if ($live -notcontains $k) { [void]$script:WinName.Remove($k); [void]$script:WinTick.Remove($k); [void]$script:WinCand.Remove($k) } }
-    $first = Known-Name
-    $script:AllNames = @(@($script:WinName.Values | Where-Object { $_ -ceq $first }) + @($script:WinName.Values | Where-Object { $_ -cne $first }) | Select-Object -Unique)
+    $first = Known-Name; $vals = @($script:WinName.Values)
+    # 저장된 이름(char_name.txt)이 방금 끈 창의 캐릭터면, 아직 켜져 있는 창의 이름으로 바꿔 둠
+    if ($vals.Count -and $vals -cnotcontains $first) {
+      $first = [string]$vals[0]
+      Set-Content -Path (Join-Path $Data 'char_name.txt') -Value @($first, 'sure') -Encoding UTF8
+      Log ('끈 창의 이름을 지움 -> 남은 캐릭터: ' + ($vals -join ', '))
+    }
+    $script:AllNames = @(@($vals | Where-Object { $_ -ceq $first }) + @($vals | Where-Object { $_ -cne $first }) | Select-Object -Unique)
   } catch {}
 }
 function Try-Name($root) {
@@ -459,7 +465,7 @@ if ($Watch) {
   if (-not $created) { exit }
   Log ('기다리기 시작 ' + $Ver)
   Self-Update
-  $was = $false; $lastPing = [DateTime]::MinValue; $lastUpd = [DateTime]::Now; $nameTries = 0
+  $was = $false; $lastPing = [DateTime]::MinValue; $lastUpd = [DateTime]::Now; $nameTries = 0; $winN = 0
   trap { Log ('기다리기 중단: ' + $_.Exception.Message); break }
   $myTime = (Get-Item $PSCommandPath -Force).LastWriteTimeUtc
   while ($true) {
@@ -485,6 +491,9 @@ if ($Watch) {
         $ndf = Join-Path $Data 'name_debug.txt'
         if ((Test-Path $ndf) -and ([string](Get-Content $ndf -TotalCount 1)).Trim() -eq 'on') { try { $tr = Read-Name; Log ('이름 시험: ' + $(if ($tr) { [string]$tr[0] + $(if ($tr[1]) { ' [바로 확정]' } else { ' [후보]' }) + ' <- ' + [string]$tr[2] } else { '못 읽음' }) + ' | ' + $script:NameDbg) } catch { Log ('이름 시험 오류: ' + $_.Exception.Message) } }
         # 한글패치가 들어 있는 사람만 집계
+        # 켜 둔 게임 창 수가 바뀌면(하나를 껐거나 더 켰으면) 바로 다시 알림
+        $wn = 0; try { $wn = @(Game-WinPids).Count } catch {}
+        if ($wn -ne $winN) { $winN = $wn; $lastPing = [DateTime]::MinValue }
         if ($root -and (Has-AnyPatch $root) -and ([DateTime]::Now - $lastPing).TotalSeconds -ge 300) { Send-Live $root; $lastPing = [DateTime]::Now }
       } else {
         $was = $false
