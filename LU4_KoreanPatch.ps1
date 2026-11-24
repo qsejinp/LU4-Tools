@@ -3,7 +3,7 @@
 #  -Bc    : 방송용 아이콘으로 켠 경우. 대미지 표시·지도·피로시스템 변경을 뺀 패치를 넣음
 #  -Watch : 윈도우 시작 때 뒤에서 켜 두는 모드. LU4 게임이 실행 중일 때만 사용 현황 신호를 보내고, 패치가 지워졌으면 알려 줌
 param([switch]$Watch, [switch]$Bc)
-$Ver = '20261124.0005'
+$Ver = '20261124.0945'
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -234,7 +234,7 @@ function Send-Live($root) {
   } catch {}
 }
 # ---------- 캐릭터 이름 확인(사용 현황용): 채팅번역·사냥지표를 안 쓰는 PC에서, 게임 창 왼쪽 위 상태창의 이름을 읽음 ----------
-$script:OcrEng = $null; $script:OcrTried = $false; $script:Clan = $null; $script:NameSeen = @()
+$script:OcrEng = $null; $script:OcrKo = $null; $script:OcrTried = $false; $script:Clan = $null; $script:Own = @(); $script:NameSeen = @(); $script:TestSkipTop = $false; $script:NameTile = -1; $script:NameScan = 0; $script:NameDbg = ''
 function Known-Name { try { $nf = Join-Path $Data 'char_name.txt'; if (Test-Path $nf) { $n = ([string](Get-Content $nf -TotalCount 1 -Encoding UTF8)).Trim(); if ($n -match '^[A-Za-z0-9_]{2,24}$') { return $n } } } catch {}; return '' }
 function Init-Ocr {
   if ($script:OcrTried) { return }; $script:OcrTried = $true
@@ -252,56 +252,122 @@ function Init-Ocr {
     if (-not $e) { try { foreach ($lg in [Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages) { if ($lg.LanguageTag -like 'en*') { $e = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($lg); if ($e) { break } } } } catch {} }
     if (-not $e) { $e = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages() }
     $script:OcrEng = $e
+    # 한글 글자 인식(있으면): 시스템 창의 "이름이(가) … 대미지" 줄을 읽는 데 씀
+    try { $script:OcrKo = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage([Windows.Globalization.Language]::new('ko')) } catch {}
+    # 이 PC에서 접속했던 캐릭터 이름: 게임 저장 폴더의 PartyBuffs_<이름>.sav 파일 이름(내용은 읽지 않음). 최근에 쓴 것부터
+    try { $script:Own = @(Get-ChildItem (Join-Path $env:LOCALAPPDATA 'LU4\Saved\SaveGames') -Filter 'PartyBuffs_*.sav' -File -ErrorAction Stop | Sort-Object LastWriteTime -Descending | ForEach-Object { $_.BaseName.Substring(11) } | Where-Object { $_ -match '^[A-Za-z0-9_]{3,24}$' }) } catch { $script:Own = @() }
     # 혈맹원 명단(있으면 이름을 훨씬 정확히 고름)
     try { $script:Clan = @((Get-Text ($Raw + 'clan_members.txt')) -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') -and $_ -match '^[A-Za-z0-9_]{2,24}$' }) } catch { $script:Clan = @() }
-    Log ('이름 읽기 준비: ' + $(if ($e) { '됨' } else { '글자 인식 없음' }) + ', 명단 ' + @($script:Clan).Count + '명')
+    Log ('이름 읽기 준비: ' + $(if ($e) { '됨' } else { '글자 인식 없음' }) + ', 명단 ' + @($script:Clan).Count + '명, 이 PC 캐릭터 ' + @($script:Own).Count + '개' + $(if ($script:OcrKo) { ', 한글 인식 있음' } else { '' }))
   } catch { Log ('이름 읽기 준비 실패: ' + $_.Exception.Message) }
 }
 function Aw($op, [Type]$t) { $task = $script:AsTaskG.MakeGenericMethod($t).Invoke($null, @($op)); [void]$task.Wait(15000); $task.Result }
+# 그림을 글자 인식해서 줄 목록으로
+function Ocr-Lines($bmp, $eng) {
+  $ms = New-Object System.IO.MemoryStream; $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); $ms.Position = 0
+  try {
+    $ras = [System.IO.WindowsRuntimeStreamExtensions]::AsRandomAccessStream($ms)
+    $dec = Aw ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($ras)) ([Windows.Graphics.Imaging.BitmapDecoder])
+    $sb = Aw ($dec.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+    $res = Aw ($eng.RecognizeAsync($sb)) ([Windows.Media.Ocr.OcrResult])
+    return @($res.Lines | ForEach-Object { [string]$_.Text })
+  } finally { $ms.Dispose() }
+}
 function Read-Name {
-  # 반환: @(이름, 확실한지)
+  # 반환: @(이름, 확실한지, 어떻게 알았는지)
+  # 두 군데를 읽어서 맞춰 봄: 1) 화면 왼쪽 위 상태창의 이름 줄  2) 시스템 창의 사냥 줄에 여러 번 나오는 내 이름
+  # 둘이 같으면 바로 확정. 하나만 읽히거나 서로 다르면 더 믿을 만한 쪽을 후보로(같은 이름이 다시 읽혀야 확정)
   Init-Ocr; if (-not $script:OcrEng) { return $null }
   $h = [LU4K]::GetForegroundWindow(); if ($h -eq [IntPtr]::Zero -or [LU4K]::IsIconic($h)) { return $null }
   $procId = [uint32]0; [void][LU4K]::GetWindowThreadProcessId($h, [ref]$procId)
   try { if ((Get-Process -Id $procId -ErrorAction Stop).ProcessName -notmatch '^(?i)lu4[\w.\-]*$') { return $null } } catch { return $null }
   $cr = New-Object LU4K+RECT; [void][LU4K]::GetClientRect($h, [ref]$cr); $p = New-Object LU4K+POINT; [void][LU4K]::ClientToScreen($h, [ref]$p)
-  $w = [int]($cr.R * 0.25); $hh = [int]($cr.B * 0.06); if ($w -lt 20 -or $hh -lt 10) { return $null }
-  $bmp = New-Object System.Drawing.Bitmap $w, $hh
-  $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($p.X, $p.Y, 0, 0, $bmp.Size); $g.Dispose()
+  if ($cr.R -lt 200 -or $cr.B -lt 150) { return $null }
   $fold = { param($x) (($x -replace '[^A-Za-z0-9_]', '').ToLower() -replace '[il1|]', 'l' -replace '0', 'o') }
-  try {
-    # 이름 줄만 좁게 자르면 잘 읽힘(게임 창의 가로 20%·세로 4%). 안 읽히면 더 좁게, 색을 뒤집어서, 마지막으로 예전 범위로
-    foreach ($v in @(@(0.20, 0.04, $false), @(0.15, 0.03, $false), @(0.20, 0.04, $true), @(0.25, 0.06, $true))) {
-      $cw = [Math]::Min($w, [int]($cr.R * $v[0])); $ch = [Math]::Min($hh, [int]($cr.B * $v[1])); if ($cw -lt 20 -or $ch -lt 8) { continue }
-      $sc = [Math]::Max(1.0, [Math]::Min(4.0, 2400.0 / [Math]::Max($cw, $ch)))
-      $big = New-Object System.Drawing.Bitmap ([int]($cw * $sc)), ([int]($ch * $sc))
-      $g = [System.Drawing.Graphics]::FromImage($big); $g.InterpolationMode = 'HighQualityBicubic'
-      $dst = New-Object System.Drawing.Rectangle 0, 0, $big.Width, $big.Height
-      if ($v[2]) {
-        # 흑백으로 바꾸고 뒤집음 (밝은 글자 -> 흰 바탕의 검은 글자)
-        $cm = New-Object System.Drawing.Imaging.ColorMatrix
-        $mx = @(@(-0.45, -0.45, -0.45, 0, 0), @(-0.9, -0.9, -0.9, 0, 0), @(-0.15, -0.15, -0.15, 0, 0), @(0, 0, 0, 1, 0), @(1.25, 1.25, 1.25, 0, 1))
-        for ($i = 0; $i -lt 5; $i++) { for ($j = 0; $j -lt 5; $j++) { $cm[$i, $j] = [single]$mx[$i][$j] } }
-        $ia = New-Object System.Drawing.Imaging.ImageAttributes; $ia.SetColorMatrix($cm)
-        $g.DrawImage($bmp, $dst, 0, 0, $cw, $ch, [System.Drawing.GraphicsUnit]::Pixel, $ia); $ia.Dispose()
-      } else { $g.DrawImage($bmp, $dst, 0, 0, $cw, $ch, [System.Drawing.GraphicsUnit]::Pixel) }
-      $g.Dispose()
-      $ms = New-Object System.IO.MemoryStream; $big.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); $big.Dispose(); $ms.Position = 0
-      $ras = [System.IO.WindowsRuntimeStreamExtensions]::AsRandomAccessStream($ms)
-      $dec = Aw ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($ras)) ([Windows.Graphics.Imaging.BitmapDecoder])
-      $sb = Aw ($dec.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
-      $res = Aw ($script:OcrEng.RecognizeAsync($sb)) ([Windows.Media.Ocr.OcrResult])
-      $ms.Dispose()
-      $lines = @($res.Lines | ForEach-Object { [string]$_.Text })
-      foreach ($ln in $lines) { foreach ($wd in ($ln -split '\s+')) { $k = & $fold $wd; if ($k.Length -lt 3) { continue }; foreach ($c in @($script:Clan)) { if ((& $fold $c) -eq $k) { return @($c, $true) } } } }
-      foreach ($ln in $lines) {
-        $t = ($ln -replace '[\[\]\(\)|]', '').Trim()
-        if ($t.Length -lt 3 -or $t.Length -gt 16 -or $t -match '\s' -or $t -match '[/%:.,+]' -or $t -match '^(?i)(HP|MP|CP|Lv|EXP|SP)\d*$') { continue }
-        $lt = ([regex]::Matches($t, '[A-Za-z]')).Count
-        if ($lt -ge 3 -and $lt -ge ([double]$t.Length) / 2) { $nm = ($t -replace '[^A-Za-z0-9_]', ''); if ($nm.Length -ge 3) { return @($nm, $false) } }
+  $ownK = @{}; foreach ($c in @($script:Own)) { $k = & $fold $c; if ($k.Length -ge 3 -and -not $ownK.ContainsKey($k)) { $ownK[$k] = $c } }
+  $sureK = @{}; foreach ($c in @($script:Clan)) { $k = & $fold $c; if ($k.Length -ge 3) { $sureK[$k] = $c } }
+  foreach ($k in $ownK.Keys) { $sureK[$k] = $ownK[$k] }   # 이 PC 캐릭터 이름이 명단보다 먼저
+  $script:NameDbg = ''
+  $a = $null; $aKind = ''; $cand = $null   # aKind: own(이 PC 캐릭터) / clan(명단) / guess(글자 모양으로 짐작)
+  if (-not $script:TestSkipTop) {
+    $w = [int]($cr.R * 0.25); $hh = [int]($cr.B * 0.06)
+    $bmp = New-Object System.Drawing.Bitmap $w, $hh
+    $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($p.X, $p.Y, 0, 0, $bmp.Size); $g.Dispose()
+    try {
+      # 이름 줄만 좁게 자르면 잘 읽힘(게임 창의 가로 20%·세로 4%). 안 읽히면 더 좁게, 색을 뒤집어서, 마지막으로 예전 범위로
+      foreach ($v in @(@(0.20, 0.04, $false), @(0.15, 0.03, $false), @(0.20, 0.04, $true), @(0.25, 0.06, $true))) {
+        $cw = [Math]::Min($w, [int]($cr.R * $v[0])); $ch = [Math]::Min($hh, [int]($cr.B * $v[1])); if ($cw -lt 20 -or $ch -lt 8) { continue }
+        $sc = [Math]::Max(1.0, [Math]::Min(4.0, 2400.0 / [Math]::Max($cw, $ch)))
+        $big = New-Object System.Drawing.Bitmap ([int]($cw * $sc)), ([int]($ch * $sc))
+        $g = [System.Drawing.Graphics]::FromImage($big); $g.InterpolationMode = 'HighQualityBicubic'
+        $dst = New-Object System.Drawing.Rectangle 0, 0, $big.Width, $big.Height
+        if ($v[2]) {
+          # 흑백으로 바꾸고 뒤집음 (밝은 글자 -> 흰 바탕의 검은 글자)
+          $cm = New-Object System.Drawing.Imaging.ColorMatrix
+          $mx = @(@(-0.45, -0.45, -0.45, 0, 0), @(-0.9, -0.9, -0.9, 0, 0), @(-0.15, -0.15, -0.15, 0, 0), @(0, 0, 0, 1, 0), @(1.25, 1.25, 1.25, 0, 1))
+          for ($i = 0; $i -lt 5; $i++) { for ($j = 0; $j -lt 5; $j++) { $cm[$i, $j] = [single]$mx[$i][$j] } }
+          $ia = New-Object System.Drawing.Imaging.ImageAttributes; $ia.SetColorMatrix($cm)
+          $g.DrawImage($bmp, $dst, 0, 0, $cw, $ch, [System.Drawing.GraphicsUnit]::Pixel, $ia); $ia.Dispose()
+        } else { $g.DrawImage($bmp, $dst, 0, 0, $cw, $ch, [System.Drawing.GraphicsUnit]::Pixel) }
+        $g.Dispose()
+        $lines = @(); try { $lines = Ocr-Lines $big $script:OcrEng } finally { $big.Dispose() }
+        foreach ($ln in $lines) { foreach ($wd in ($ln -split '\s+')) { $k = & $fold $wd; if (-not $a -and $k.Length -ge 3 -and $sureK.ContainsKey($k)) { $a = $sureK[$k]; $aKind = $(if ($ownK.ContainsKey($k)) { 'own' } else { 'clan' }) } } }
+        if ($a) { break }
+        if ($cand) { continue }
+        foreach ($ln in $lines) {
+          $t = ($ln -replace '[\[\]\(\)|]', '').Trim()
+          if ($t.Length -lt 3 -or $t.Length -gt 16 -or $t -match '\s' -or $t -match '[/%:.,+]' -or $t -match '^(?i)(HP|MP|CP|Lv|EXP|SP)\d*$') { continue }
+          $lt = ([regex]::Matches($t, '[A-Za-z]')).Count
+          if ($lt -ge 3 -and $lt -ge ([double]$t.Length) / 2) { $nm = ($t -replace '[^A-Za-z0-9_]', ''); if ($nm.Length -ge 3) { $cand = $nm; break } }
+        }
       }
+    } finally { $bmp.Dispose() }
+    if (-not $a -and $cand) { $a = $cand; $aKind = 'guess' }
+  }
+  # 2) 화면 전체: 9칸으로 나눠 크게 키워서 읽음(통째로 읽으면 글자가 작아 안 읽힘)
+  #    시스템 창의 사냥 줄에는 내 이름이 한 낱말로 여러 번 나옴 -> 혼자 한 줄로 읽힌 영문 낱말 중 3번 이상 나온 것
+  #    지난번에 찾은 칸 먼저, 그다음 왼쪽 세 칸(기본 위치). 나머지 칸은 6번에 한 번만
+  $b = $null; $bKind = ''; $bN = 0; $bOnly = $false   # bKind: own(이 PC 캐릭터 이름이 화면에 보임) / sys(시스템 창의 사냥 줄)
+  $full = New-Object System.Drawing.Bitmap ([int]$cr.R), ([int]$cr.B)
+  $g = [System.Drawing.Graphics]::FromImage($full); $g.CopyFromScreen($p.X, $p.Y, 0, 0, $full.Size); $g.Dispose()
+  try {
+    $script:NameScan++
+    $order = @(0, 3, 6); if ($script:NameTile -ge 0) { $order = @($script:NameTile) + @($order | Where-Object { $_ -ne $script:NameTile }) }
+    if ($script:NameScan % 6 -eq 1) { $order += @(1, 4, 7, 2, 5, 8 | Where-Object { $order -notcontains $_ }) }
+    $tw = [int]($cr.R * 0.38); $th = [int]($cr.B * 0.38); $sc = [Math]::Max(1.0, [Math]::Min(3.0, 2600.0 / $tw))
+    foreach ($ti in $order) {
+      $rx = $ti % 3; $ry = [int][Math]::Floor($ti / 3)
+      $x0 = [int][Math]::Min($cr.R - $tw, [Math]::Max(0, $cr.R * (0.31 * $rx))); $y0 = [int][Math]::Min($cr.B - $th, [Math]::Max(0, $cr.B * (0.31 * $ry)))
+      $big = New-Object System.Drawing.Bitmap ([int]($tw * $sc)), ([int]($th * $sc)); $g = [System.Drawing.Graphics]::FromImage($big); $g.InterpolationMode = 'HighQualityBicubic'
+      $g.DrawImage($full, (New-Object System.Drawing.Rectangle 0, 0, $big.Width, $big.Height), $x0, $y0, $tw, $th, [System.Drawing.GraphicsUnit]::Pixel); $g.Dispose()
+      $lines = @(); try { $lines = Ocr-Lines $big $script:OcrEng } finally { $big.Dispose() }
+      $cnt = @{}; $raw = @{}
+      foreach ($ln in $lines) {
+        $t = $ln.Trim()
+        if ($t -notmatch '^[A-Za-z][A-Za-z0-9_]{2,15}$' -or $t -match '^(?i)(HP|MP|CP|EXP|SP|Lv|DeepL|Chain|Compact|Always|Off)$') { continue }
+        $k = & $fold $t; $cnt[$k] = 1 + [int]$cnt[$k]; if (-not $raw.ContainsKey($k)) { $raw[$k] = @() }; $raw[$k] += $t
+      }
+      if (-not $cnt.Count) { $script:NameDbg += ' 칸' + $ti + ':없음'; continue }
+      $rank = @($cnt.GetEnumerator() | Sort-Object Value -Descending); $best = $rank[0]
+      $script:NameDbg += ' 칸' + $ti + ':' + (@($rank | Select-Object -First 3 | ForEach-Object { [string]$raw[$_.Key][0] + 'x' + $_.Value }) -join ',')
+      if ($best.Value -lt 3 -or ($rank.Count -gt 1 -and $rank[1].Value * 2 -gt $best.Value)) { continue }
+      $bN = [int]$best.Value; $bOnly = $true; $script:NameTile = $ti
+      if ($sureK.ContainsKey($best.Key)) { $b = $sureK[$best.Key]; $bKind = $(if ($ownK.ContainsKey($best.Key)) { 'own' } else { 'sys' }) }
+      else { $b = [string](@($raw[$best.Key] | Group-Object -CaseSensitive | Sort-Object Count -Descending)[0].Name); $bKind = 'sys' }
+      break
     }
-  } finally { $bmp.Dispose() }
+  } finally { $full.Dispose() }
+  $script:NameDbg = '상태창=' + $(if ($a) { $a + '(' + $aKind + ')' } else { '없음' }) + ' /' + $script:NameDbg
+  # 3) 두 결과를 맞춰 봄
+  $nmA = @{ own = '상태창(이 PC 캐릭터)'; clan = '상태창(명단)'; guess = '상태창' }; $nmB = @{ own = '시스템 창(이 PC 캐릭터)'; sys = '시스템 창 사냥 줄' }
+  if ($a -and $b) {
+    if ((& $fold $a) -eq (& $fold $b)) { return @($(if ($aKind -eq 'guess' -and $bKind -eq 'own') { $b } else { $a }), $true, ($nmA[$aKind] + ' = ' + $nmB[$bKind])) }
+    if ($aKind -eq 'own') { return @($a, $true, ($nmA[$aKind] + ' (화면 쪽은 ' + $b + ')')) }
+    return @($b, ($aKind -eq 'guess' -and $bN -ge 5), ($nmB[$bKind] + ' ' + $bN + '번 (상태창 쪽은 ' + $a + ')'))
+  }
+  if ($a) { return @($a, ($aKind -ne 'guess'), $nmA[$aKind]) }
+  # 상태창을 못 읽어도, 시스템 창에 같은 이름이 5번 이상 나오면 그것만으로 바로 확정
+  if ($b) { return @($b, ($bN -ge 5), ($nmB[$bKind] + ' ' + $bN + '번')) }
   return $null
 }
 function Try-Name($root) {
@@ -317,7 +383,7 @@ function Try-Name($root) {
       $nm = [string](@($same | Group-Object -CaseSensitive | Sort-Object Count -Descending)[0].Name)
     }
     Set-Content -Path (Join-Path $Data 'char_name.txt') -Value @($nm, $(if ($r[1]) { 'sure' } else { 'ocr' })) -Encoding UTF8
-    Log ('이름 확인: ' + $nm + $(if ($r[1]) { ' (명단)' } else { '' })); Send-Live $root
+    Log ('이름 확인: ' + $nm + ' / ' + [string]$r[2] + $(if ($r[1]) { '' } else { ' (두 번 읽힘)' })); Send-Live $root
   } catch { Log ('이름 읽기 오류: ' + $_.Exception.Message) }
 }
 function Start-Watcher {
@@ -360,6 +426,9 @@ if ($Watch) {
           }
         }
         if ($root -and (Has-AnyPatch $root)) { Try-Name $root }   # 이름을 아직 모르면 상태창에서 읽어 봄
+        # 시험 기록: name_debug.txt 가 있으면(만든 사람만 해당) 읽은 결과를 저장하지 않고 기록만 남김
+        $ndf = Join-Path $Data 'name_debug.txt'
+        if ((Test-Path $ndf) -and ([string](Get-Content $ndf -TotalCount 1)).Trim() -eq 'on') { try { $tr = Read-Name; Log ('이름 시험: ' + $(if ($tr) { [string]$tr[0] + $(if ($tr[1]) { ' [바로 확정]' } else { ' [후보]' }) + ' <- ' + [string]$tr[2] } else { '못 읽음' }) + ' | ' + $script:NameDbg) } catch { Log ('이름 시험 오류: ' + $_.Exception.Message) } }
         # 한글패치가 들어 있는 사람만 집계
         if ($root -and (Has-AnyPatch $root) -and ([DateTime]::Now - $lastPing).TotalSeconds -ge 300) { Send-Live $root; $lastPing = [DateTime]::Now }
       } else {

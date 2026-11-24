@@ -3,7 +3,7 @@
 #  -Bc    : 방송용 아이콘으로 켠 경우. 대미지 표시·지도·피로시스템 변경을 뺀 패치를 넣음
 #  -Watch : 윈도우 시작 때 뒤에서 켜 두는 모드. LU4 게임이 실행 중일 때만 사용 현황 신호를 보내고, 패치가 지워졌으면 알려 줌
 param([switch]$Watch, [switch]$Bc)
-$Ver = '20261124.0940'
+$Ver = '20261124.0945'
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -427,7 +427,8 @@ if ($Watch) {
         }
         if ($root -and (Has-AnyPatch $root)) { Try-Name $root }   # 이름을 아직 모르면 상태창에서 읽어 봄
         # 시험 기록: name_debug.txt 가 있으면(만든 사람만 해당) 읽은 결과를 저장하지 않고 기록만 남김
-        if (Test-Path (Join-Path $Data 'name_debug.txt')) { try { $tr = Read-Name; Log ('이름 시험: ' + $(if ($tr) { [string]$tr[0] + $(if ($tr[1]) { ' [바로 확정]' } else { ' [후보]' }) + ' <- ' + [string]$tr[2] } else { '못 읽음' }) + ' | ' + $script:NameDbg) } catch { Log ('이름 시험 오류: ' + $_.Exception.Message) } }
+        $ndf = Join-Path $Data 'name_debug.txt'
+        if ((Test-Path $ndf) -and ([string](Get-Content $ndf -TotalCount 1)).Trim() -eq 'on') { try { $tr = Read-Name; Log ('이름 시험: ' + $(if ($tr) { [string]$tr[0] + $(if ($tr[1]) { ' [바로 확정]' } else { ' [후보]' }) + ' <- ' + [string]$tr[2] } else { '못 읽음' }) + ' | ' + $script:NameDbg) } catch { Log ('이름 시험 오류: ' + $_.Exception.Message) } }
         # 한글패치가 들어 있는 사람만 집계
         if ($root -and (Has-AnyPatch $root) -and ([DateTime]::Now - $lastPing).TotalSeconds -ge 300) { Send-Live $root; $lastPing = [DateTime]::Now }
       } else {
