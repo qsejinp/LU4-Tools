@@ -1,6 +1,6 @@
 // LU4 Tools 실행 중인 사람 세기 (Cloudflare Worker + D1)  - made by DoZ
 // 프로그램이 5분마다 /ping 으로 무작위 번호를 보내면, 최근 10분 안에 보낸 번호를 "지금 실행 중"으로 셉니다.
-// 저장하는 것: 무작위 번호, 프로그램 종류, 버전, 캐릭터 이름(게임 창을 여러 개 켜면 여러 개), 그 PC에서 쓴 이름 기록, 처음/마지막 신호 시각,
+// 저장하는 것: 무작위 번호, 프로그램 종류, 버전, 캐릭터 이름(게임 창을 여러 개 켜면 여러 개), 그 PC에서 쓴 이름 기록, 처음/마지막 신호 시각, 날짜별 쓴 시간,
 //   같은 집(같은 인터넷) PC를 묶기 위한 '집 구분 번호'(접속 주소를 비밀키와 섞어 되돌릴 수 없게 바꾼 12글자. 접속 주소(IP) 자체는 저장하지 않음)
 // 캐릭터 이름은 /json?key=비밀키 로만 볼 수 있음(비밀키는 Cloudflare의 Secret 변수 VIEW_KEY)
 
@@ -28,6 +28,9 @@ async function init(db) {
   // 같은 집 묶기용 구분 번호 / PC별로 쓴 캐릭터 이름 기록
   try { await db.prepare('ALTER TABLE pings ADD COLUMN net TEXT').run(); } catch (e) { /* 이미 있음 */ }
   await db.prepare('CREATE TABLE IF NOT EXISTS names (id TEXT NOT NULL, name TEXT NOT NULL, last INTEGER, PRIMARY KEY (id, name))').run();
+  // 접속 시간 통계: PC별 마지막 신호/이번 접속 시작 시각(seen), PC·날짜별 쓴 시간(초)(use)
+  await db.prepare('CREATE TABLE IF NOT EXISTS seen (id TEXT PRIMARY KEY, last INTEGER, since INTEGER)').run();
+  await db.prepare('CREATE TABLE IF NOT EXISTS use (id TEXT NOT NULL, d INTEGER NOT NULL, sec INTEGER NOT NULL, PRIMARY KEY (id, d))').run();
   ready = true;
 }
 
@@ -90,6 +93,17 @@ export default {
         if (net) await env.DB.prepare('UPDATE pings SET net = ?1 WHERE id = ?2').bind(net, id).run();
         for (const nm of (name ? name.split(', ') : [])) await env.DB.prepare('INSERT INTO names (id, name, last) VALUES (?1, ?2, ?3) ON CONFLICT (id, name) DO UPDATE SET last = ?3').bind(id, nm, now).run();
       } catch (e) { /* 기록 실패는 무시 */ }
+      // 접속 시간: 앞 신호가 10분 안이면 그 사이 시간을 오늘 쓴 시간에 더함(프로그램 여러 개가 보내도 겹치지 않음). 아니면 새 접속 시작
+      try {
+        const sn = await env.DB.prepare('SELECT last, since FROM seen WHERE id = ?1').bind(id).first();
+        if (sn && now - sn.last <= LIVE_SEC) {
+          const add = Math.max(0, now - sn.last);
+          if (add > 0) await env.DB.prepare('INSERT INTO use (id, d, sec) VALUES (?1, ?2, ?3) ON CONFLICT (id, d) DO UPDATE SET sec = sec + ?3').bind(id, Math.floor((now + KST) / 86400), add).run();
+          await env.DB.prepare('UPDATE seen SET last = ?2 WHERE id = ?1').bind(id, now).run();
+        } else {
+          await env.DB.prepare('INSERT INTO seen (id, last, since) VALUES (?1, ?2, ?2) ON CONFLICT (id) DO UPDATE SET last = ?2, since = ?2').bind(id, now).run();
+        }
+      } catch (e) { /* 통계 실패는 무시 */ }
       await env.DB.prepare('INSERT OR IGNORE INTO days (id, app, d) VALUES (?1, ?2, ?3)').bind(id, app, Math.floor((now + KST) / 86400)).run();
       return new Response('ok', { headers: { 'cache-control': 'no-store' } });
     }
@@ -126,11 +140,26 @@ export default {
       const hs = await q('SELECT id, name FROM names WHERE last >= ?1 ORDER BY last DESC', now - HIST_SEC);
       const hist = {};
       for (const h of hs) { if (NOT_NAME.test(h.name)) continue; (hist[h.id] = hist[h.id] || []).push(h.name); }
+      // 접속 시간 통계
+      const seenRows = await q('SELECT id, last, since FROM seen');
+      const seen = {}; for (const r of seenRows) seen[r.id] = r;
+      const useTot = await q('SELECT id, SUM(sec) t, COUNT(*) dn, MIN(d) d0 FROM use GROUP BY id');
+      const tot = {}; for (const r of useTot) tot[r.id] = r;
+      const useDay = await q('SELECT id, sec FROM use WHERE d = ?1', dToday);
+      const day = {}; for (const r of useDay) day[r.id] = r.sec;
+      const allNames = await q("SELECT id, GROUP_CONCAT(COALESCE(name, ''), '|') names FROM pings GROUP BY id");
+      const nameOf = {}; for (const r of allNames) nameOf[r.id] = String(r.names || '').split('|').sort((x, y) => y.length - x.length)[0].split(', ').filter(x => x && !NOT_NAME.test(x));
+      const liveSet = new Set(us.map(u => u.id));
+      data.stats = {
+        from: useTot.length ? (Math.min(...useTot.map(r => r.d0)) * 86400 - KST) : 0,
+        rows: useTot.map(r => ({ id: r.id, on: nameOf[r.id] || [], past: (hist[r.id] || []).filter(x => !(nameOf[r.id] || []).some(y => y.toLowerCase() === x.toLowerCase())).slice(0, 8),
+          total: r.t, today: day[r.id] || 0, days: r.dn, last: (seen[r.id] || {}).last || 0, live: liveSet.has(r.id) })).sort((x, y) => y.total - x.total).slice(0, 300)
+      };
       data.users = us.map(u => {
         const cur = String(u.name || '').split(', ').filter(x => x && !NOT_NAME.test(x));
         const low = new Set(cur.map(x => x.toLowerCase()));
         return { id: u.id, name: cur.join(', ') || '(이름 확인 전)', on: cur, past: (hist[u.id] || []).filter(x => !low.has(x.toLowerCase())).slice(0, 8),
-          net: u.net || '', apps: String(u.apps || '').split(',').filter(a => a in APPS), ago: now - u.last, blocked: bset.has(u.id) };
+          net: u.net || '', since: (seen[u.id] || {}).since || 0, today: day[u.id] || 0, total: (tot[u.id] || {}).t || 0, apps: String(u.apps || '').split(',').filter(a => a in APPS), ago: now - u.last, blocked: bset.has(u.id) };
       });
       data.blocked = bl.map(b => ({ id: b.id, name: b.name || '(이름 확인 전)' }));
     }
