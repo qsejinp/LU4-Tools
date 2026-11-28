@@ -3,7 +3,7 @@
 #  -Bc    : 방송용 아이콘으로 켠 경우. 대미지 표시·지도·피로시스템 변경을 뺀 패치를 넣음
 #  -Watch : 윈도우 시작 때 뒤에서 켜 두는 모드. LU4 게임이 실행 중일 때만 사용 현황 신호를 보내고, 패치가 지워졌으면 알려 줌
 param([switch]$Watch, [switch]$Bc)
-$Ver = '20261124.1900'
+$Ver = '20261128.2030'
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -335,7 +335,9 @@ function Read-Name {
   try {
     $script:NameScan++
     $order = @(0, 3, 6); if ($script:NameTile -ge 0) { $order = @($script:NameTile) + @($order | Where-Object { $_ -ne $script:NameTile }) }
-    if ($script:NameScan % 6 -eq 1) { $order += @(1, 4, 7, 2, 5, 8 | Where-Object { $order -notcontains $_ }) }
+    # 시스템 창을 오른쪽 등 다른 곳으로 옮긴 사람: 아직 어느 칸인지 모르면 두 번에 한 번은 나머지 칸도 모두 읽음(찾은 뒤에는 6번에 한 번)
+    $allTiles = ($script:NameScan % 6 -eq 1) -or ($script:NameTile -lt 0 -and $script:NameScan % 2 -eq 1)
+    if ($allTiles) { $order += @(1, 4, 7, 2, 5, 8 | Where-Object { $order -notcontains $_ }) }
     $tw = [int]($cr.R * 0.38); $th = [int]($cr.B * 0.38); $sc = [Math]::Max(1.0, [Math]::Min(3.0, 2600.0 / $tw))
     foreach ($ti in $order) {
       $rx = $ti % 3; $ry = [int][Math]::Floor($ti / 3)
@@ -359,6 +361,8 @@ function Read-Name {
       break
     }
   } finally { $full.Dispose() }
+  # 이 게임 창에서 화면 전체(9칸)를 다 읽고도 시스템 창 이름을 못 찾은 횟수
+  if ($allTiles -and -not $b) { $script:NameFullMiss[[string]$procId] = 1 + [int]$script:NameFullMiss[[string]$procId] }
   $script:NameDbg = '상태창=' + $(if ($a) { $a + '(' + $aKind + ')' } else { '없음' }) + ' /' + $script:NameDbg
   # 3) 두 결과를 맞춰 봄
   $nmA = @{ own = '상태창(이 PC 캐릭터)'; clan = '상태창(명단)'; guess = '상태창' }; $nmB = @{ own = '시스템 창(이 PC 캐릭터)'; sys = '시스템 창 사냥 줄' }
@@ -367,13 +371,16 @@ function Read-Name {
     if ($aKind -eq 'own') { return @($a, $true, ($nmA[$aKind] + ' (화면 쪽은 ' + $b + ')'), 2) }
     return @($b, ($bN -ge 5), ($nmB[$bKind] + ' ' + $bN + '번 (상태창 쪽은 ' + $a + ')'), $(if ($bN -ge 5) { 2 } else { 0 }))
   }
+  # 왼쪽 위에서 글자 모양만 보고 짐작한 이름은, 화면 전체를 두 번 훑고도 시스템 창에서 이름을 못 찾았을 때만 후보로 씀
+  # (상태창을 옮겼거나 가린 사람은 왼쪽 위에 다른 글자가 있어 틀린 이름이 먼저 올라가던 것 방지)
+  if ($a -and $aKind -eq 'guess' -and [int]$script:NameFullMiss[[string]$procId] -lt 2) { $script:NameDbg += ' / 짐작 이름 보류'; return $null }
   if ($a) { return @($a, ($aKind -ne 'guess'), $nmA[$aKind], $(if ($aKind -eq 'own') { 2 } elseif ($aKind -eq 'clan') { 1 } else { 0 })) }
   # 상태창을 못 읽어도, 시스템 창에 같은 이름이 5번 이상 나오면 그것만으로 바로 확정
   if ($b) { return @($b, ($bN -ge 5), ($nmB[$bKind] + ' ' + $bN + '번'), $(if ($bN -ge 5) { 2 } else { 0 })) }
   return $null
 }
 # 게임 창마다(프로세스 번호별로) 이름을 따로 기억함: 게임을 다시 켜면 새 창이라 다시 확인하고, 창을 두 개 켜면 둘 다 알 수 있음
-$script:NamePid = 0; $script:WinName = @{}; $script:WinCand = @{}; $script:WinTick = @{}; $script:AllNames = @()
+$script:NamePid = 0; $script:NameFullMiss = @{}; $script:WinName = @{}; $script:WinCand = @{}; $script:WinTick = @{}; $script:AllNames = @()
 function Game-WinPids { return @(Game-Procs | Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero } | ForEach-Object { [string]$_.Id }) }
 # 맨 앞 창이 게임이면 그 프로세스 번호, 아니면 0
 function Fg-GamePid {
