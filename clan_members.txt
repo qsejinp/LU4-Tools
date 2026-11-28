@@ -68,7 +68,6 @@ Sola
 SongSong
 Spaniel
 tovHP
-Trangira
 Vichan
 VIP
 VladA4
@@ -79,3 +78,10 @@ yuju
 ZACU
 ZIC
 Zinnia
+# 내 캐릭터(혈원으로 간주) - 혈원 명단을 새로 바꿀 때도 이 아래는 그대로 둠
+GoruZ
+Raven
+Trangira
+squirrel
+Relic
+SnipE
