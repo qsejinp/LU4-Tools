@@ -1,6 +1,7 @@
 // LU4 Tools 실행 중인 사람 세기 (Cloudflare Worker + D1)  - made by DoZ
 // 프로그램이 5분마다 /ping 으로 무작위 번호를 보내면, 최근 10분 안에 보낸 번호를 "지금 실행 중"으로 셉니다.
-// 저장하는 것: 무작위 번호, 프로그램 종류, 버전, 캐릭터 이름(게임 창을 여러 개 켜면 여러 개), 처음/마지막 신호 시각 (IP 등은 저장하지 않음)
+// 저장하는 것: 무작위 번호, 프로그램 종류, 버전, 캐릭터 이름(게임 창을 여러 개 켜면 여러 개), 그 PC에서 쓴 이름 기록, 처음/마지막 신호 시각,
+//   같은 집(같은 인터넷) PC를 묶기 위한 '집 구분 번호'(접속 주소를 비밀키와 섞어 되돌릴 수 없게 바꾼 12글자. 접속 주소(IP) 자체는 저장하지 않음)
 // 캐릭터 이름은 /json?key=비밀키 로만 볼 수 있음(비밀키는 Cloudflare의 Secret 변수 VIEW_KEY)
 
 const APPS = { chat: '채팅번역', meter: '사냥지표', patch: '한글패치' };
@@ -24,7 +25,21 @@ async function init(db) {
   await db.prepare('INSERT OR IGNORE INTO days (id, app, d) SELECT id, app, CAST((first + ?1) / 86400 AS INTEGER) FROM pings').bind(KST).run();
   // 차단한 PC(고유 번호): 한글패치를 새로 받거나 다시 넣지 못하게
   await db.prepare('CREATE TABLE IF NOT EXISTS blocks (id TEXT PRIMARY KEY, t INTEGER)').run();
+  // 같은 집 묶기용 구분 번호 / PC별로 쓴 캐릭터 이름 기록
+  try { await db.prepare('ALTER TABLE pings ADD COLUMN net TEXT').run(); } catch (e) { /* 이미 있음 */ }
+  await db.prepare('CREATE TABLE IF NOT EXISTS names (id TEXT NOT NULL, name TEXT NOT NULL, last INTEGER, PRIMARY KEY (id, name))').run();
   ready = true;
+}
+
+// 개인 상점 글자(Private Store - Sell 등)를 이름으로 잘못 읽은 것
+const NOT_NAME = /privat|store|packag|^(sell|buy|sale)$/i;
+const NAME_RE = /^[A-Za-z0-9_\uAC00-\uD7A3]{2,24}$/;
+const HIST_SEC = 30 * 86400;       // PC별 이름 기록은 30일 동안 보여 줌
+async function netCode(req, env) {
+  const ip = req.headers.get('CF-Connecting-IP') || '';
+  if (!ip) return '';
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(ip + '|' + (env.VIEW_KEY || 'lu4-live')));
+  return [...new Uint8Array(buf)].slice(0, 6).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
 function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
@@ -56,10 +71,11 @@ export default {
       const app = url.searchParams.get('app') || '';
       const ver = url.searchParams.get('v') || '';
       let name = (url.searchParams.get('n') || '').trim();
-      if (!/^[A-Za-z0-9_\uAC00-\uD7A3]{2,24}$/.test(name)) name = '';
+      if (!NAME_RE.test(name) || NOT_NAME.test(name)) name = '';
       // 게임 창을 여러 개 켠 PC: ns=이름1,이름2 (최대 4개) -> "이름1, 이름2"로 저장
-      const names = (url.searchParams.get('ns') || '').split(',').map(x => x.trim()).filter(x => /^[A-Za-z0-9_\uAC00-\uD7A3]{2,24}$/.test(x)).slice(0, 4);
+      const names = (url.searchParams.get('ns') || '').split(',').map(x => x.trim()).filter(x => NAME_RE.test(x) && !NOT_NAME.test(x)).slice(0, 4);
       if (names.length > 1) name = names.join(', ');
+      else if (names.length === 1 && !name) name = names[0];
       const num = k => { const v = url.searchParams.get(k) || ''; return /^\d{1,6}$/.test(v) ? parseInt(v, 10) : 0; };
       const gv = num('g'), pv = num('pg');
       if (!/^[a-f0-9]{16,40}$/.test(id) || !(app in APPS) || (ver && !/^\d{8}\.\d{4}$/.test(ver))) {
@@ -69,6 +85,11 @@ export default {
         'INSERT INTO pings (id, app, ver, first, last, name, gv, pv) VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7) ' +
         "ON CONFLICT (id, app) DO UPDATE SET ver = ?3, last = ?4, name = CASE WHEN ?5 <> '' THEN ?5 ELSE name END, gv = CASE WHEN ?6 > 0 THEN ?6 ELSE gv END, pv = CASE WHEN ?7 > 0 THEN ?7 ELSE pv END"
       ).bind(id, app, ver, now, name, gv, pv).run();
+      try {
+        const net = await netCode(req, env);
+        if (net) await env.DB.prepare('UPDATE pings SET net = ?1 WHERE id = ?2').bind(net, id).run();
+        for (const nm of (name ? name.split(', ') : [])) await env.DB.prepare('INSERT INTO names (id, name, last) VALUES (?1, ?2, ?3) ON CONFLICT (id, name) DO UPDATE SET last = ?3').bind(id, nm, now).run();
+      } catch (e) { /* 기록 실패는 무시 */ }
       await env.DB.prepare('INSERT OR IGNORE INTO days (id, app, d) VALUES (?1, ?2, ?3)').bind(id, app, Math.floor((now + KST) / 86400)).run();
       return new Response('ok', { headers: { 'cache-control': 'no-store' } });
     }
@@ -96,12 +117,21 @@ export default {
     const key = url.searchParams.get('key') || '';
     if (env.VIEW_KEY && key === env.VIEW_KEY) {
       // 같은 PC가 프로그램마다 이름을 따로 보냄 -> 가장 긴 것(여러 캐릭터가 적힌 것)을 씀
-      const us = (await q("SELECT id, GROUP_CONCAT(COALESCE(name, ''), '|') names, GROUP_CONCAT(app) apps, MAX(last) last FROM pings WHERE last >= ?1 GROUP BY id", now - LIVE_SEC))
+      const us = (await q("SELECT id, GROUP_CONCAT(COALESCE(name, ''), '|') names, GROUP_CONCAT(app) apps, MAX(last) last, MAX(COALESCE(net, '')) net FROM pings WHERE last >= ?1 GROUP BY id", now - LIVE_SEC))
         .map(u => ({ ...u, name: String(u.names || '').split('|').sort((x, y) => y.length - x.length)[0] || '' }))
         .sort((x, y) => x.name.localeCompare(y.name));
       const bl = await q("SELECT b.id id, COALESCE((SELECT MAX(COALESCE(p.name, '')) FROM pings p WHERE p.id = b.id), '') name FROM blocks b ORDER BY b.t");
       const bset = new Set(bl.map(b => b.id));
-      data.users = us.map(u => ({ id: u.id, name: u.name || '(이름 확인 전)', apps: String(u.apps || '').split(',').filter(a => a in APPS), ago: now - u.last, blocked: bset.has(u.id) }));
+      // PC별로 예전에 쓴 이름(최근 30일, 지금 쓰는 이름 제외, 최근 순 8개까지)
+      const hs = await q('SELECT id, name FROM names WHERE last >= ?1 ORDER BY last DESC', now - HIST_SEC);
+      const hist = {};
+      for (const h of hs) { if (NOT_NAME.test(h.name)) continue; (hist[h.id] = hist[h.id] || []).push(h.name); }
+      data.users = us.map(u => {
+        const cur = String(u.name || '').split(', ').filter(x => x && !NOT_NAME.test(x));
+        const low = new Set(cur.map(x => x.toLowerCase()));
+        return { id: u.id, name: cur.join(', ') || '(이름 확인 전)', on: cur, past: (hist[u.id] || []).filter(x => !low.has(x.toLowerCase())).slice(0, 8),
+          net: u.net || '', apps: String(u.apps || '').split(',').filter(a => a in APPS), ago: now - u.last, blocked: bset.has(u.id) };
+      });
       data.blocked = bl.map(b => ({ id: b.id, name: b.name || '(이름 확인 전)' }));
     }
 
