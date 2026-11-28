@@ -3,7 +3,7 @@
 #  -Bc    : 방송용 아이콘으로 켠 경우. 대미지 표시·지도·피로시스템 변경을 뺀 패치를 넣음
 #  -Watch : 윈도우 시작 때 뒤에서 켜 두는 모드. LU4 게임이 실행 중일 때만 사용 현황 신호를 보내고, 패치가 지워졌으면 알려 줌
 param([switch]$Watch, [switch]$Bc)
-$Ver = '20261128.2030'
+$Ver = '20261128.2100'
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -229,9 +229,10 @@ function Send-Live($root) {
     $gv = $(if ($root) { Game-Ver $root } else { 0 })
     $id = Get-Id
     try { if (Get-Command Prune-Names -ErrorAction SilentlyContinue) { Prune-Names } } catch {}
-    $nm = ''; try { $nf = Join-Path $Data 'char_name.txt'; if (Test-Path $nf) { $nm = ([string](Get-Content $nf -TotalCount 1 -Encoding UTF8)).Trim(); if ($nm -notmatch '^[A-Za-z0-9_]{2,24}$') { $nm = '' } } } catch {}
+    # 확실한 이름(둘째 줄이 'sure')만 보냄. 없으면 x=1 로 '이름 확인 전'임을 알림
+    $nm = ''; try { $nf = Join-Path $Data 'char_name.txt'; if (Test-Path $nf) { $nl2 = @(Get-Content $nf -TotalCount 2 -Encoding UTF8); if ($nl2.Count -ge 2 -and ([string]$nl2[1]).Trim() -eq 'sure') { $nm = ([string]$nl2[0]).Trim() }; if ($nm -notmatch '^[A-Za-z0-9_]{2,24}$' -or $nm -match '(?i)privat|store|packag|^(sell|buy|sale)$') { $nm = '' } } } catch {}
     $wc = New-Object System.Net.WebClient
-    try { [void]$wc.DownloadString(($LiveUrl + '?id=' + $id + '&app=patch&v=' + $Ver + '&g=' + $gv + '&pg=' + [int]$script:PG + '&n=' + [Uri]::EscapeDataString($nm) + $(if (@($script:AllNames).Count -gt 1) { '&ns=' + [Uri]::EscapeDataString((@($script:AllNames | Select-Object -First 4) -join ',')) } else { '' }) + '&t=' + [DateTime]::UtcNow.Ticks)) } finally { $wc.Dispose() }
+    try { [void]$wc.DownloadString(($LiveUrl + '?id=' + $id + '&app=patch&v=' + $Ver + '&g=' + $gv + '&pg=' + [int]$script:PG + '&n=' + [Uri]::EscapeDataString($nm) + $(if (-not $nm -and @($script:AllNames).Count -lt 1) { '&x=1' } else { '' }) + $(if (@($script:AllNames).Count -gt 1) { '&ns=' + [Uri]::EscapeDataString((@($script:AllNames | Select-Object -First 4) -join ',')) } else { '' }) + '&t=' + [DateTime]::UtcNow.Ticks)) } finally { $wc.Dispose() }
   } catch {}
 }
 # ---------- 캐릭터 이름 확인(사용 현황용): 채팅번역·사냥지표를 안 쓰는 PC에서, 게임 창 왼쪽 위 상태창의 이름을 읽음 ----------
@@ -444,14 +445,9 @@ function Try-Name($root) {
       # 지난번에 저장된 이름과 같음 -> 바로 확정(저장된 표기 그대로)
       Publish-Name $root $key $hint 'sure' ('이름 확인: ' + $hint + ' / 지난번과 같음, ' + [string]$r[2]); return
     }
-    if (-not $r[1]) {
-      # 확실하지 않으면: 이 창에서 최근 6번 읽은 것 중 같은 이름(대소문자 무시)이 2번 나오면 확정. 대소문자는 더 많이 읽힌 쪽으로
-      $c = $script:WinCand[$key]; if (-not $c) { $c = @{ c = ''; n = 0; seen = @() }; $script:WinCand[$key] = $c }
-      $c.seen = @(@($c.seen) + $nm | Select-Object -Last 6)
-      $same = @($c.seen | Where-Object { $_ -ieq $nm }); if ($same.Count -lt 2) { return }
-      $nm = [string](@($same | Group-Object -CaseSensitive | Sort-Object Count -Descending)[0].Name)
-    }
-    Publish-Name $root $key $nm $(if ($r[1]) { 'sure' } else { 'ocr' }) ('이름 확인: ' + $nm + ' / ' + [string]$r[2] + $(if ($r[1]) { '' } else { ' (두 번 읽힘)' }))
+    # 확실하지 않은(짐작한) 이름은 올리지 않음 -> 사용 현황에 '(이름 확인 전)'으로 보임. 확실해질 때까지 계속 읽어 봄
+    if (-not $r[1]) { return }
+    Publish-Name $root $key $nm 'sure' ('이름 확인: ' + $nm + ' / ' + [string]$r[2])
   } catch { Log ('이름 읽기 오류: ' + $_.Exception.Message) }
 }
 function Start-Watcher {

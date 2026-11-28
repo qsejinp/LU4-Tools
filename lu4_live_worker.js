@@ -81,13 +81,15 @@ export default {
       else if (names.length === 1 && !name) name = names[0];
       const num = k => { const v = url.searchParams.get(k) || ''; return /^\d{1,6}$/.test(v) ? parseInt(v, 10) : 0; };
       const gv = num('g'), pv = num('pg');
+      // x=1: 프로그램이 '아직 확실한 이름이 없음'을 알림 -> 예전에 짐작으로 올라간 이름을 지움
+      const clr = (url.searchParams.get('x') === '1' && !name) ? 1 : 0;
       if (!/^[a-f0-9]{16,40}$/.test(id) || !(app in APPS) || (ver && !/^\d{8}\.\d{4}$/.test(ver))) {
         return new Response('bad', { status: 400 });
       }
       await env.DB.prepare(
         'INSERT INTO pings (id, app, ver, first, last, name, gv, pv) VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7) ' +
-        "ON CONFLICT (id, app) DO UPDATE SET ver = ?3, last = ?4, name = CASE WHEN ?5 <> '' THEN ?5 ELSE name END, gv = CASE WHEN ?6 > 0 THEN ?6 ELSE gv END, pv = CASE WHEN ?7 > 0 THEN ?7 ELSE pv END"
-      ).bind(id, app, ver, now, name, gv, pv).run();
+        "ON CONFLICT (id, app) DO UPDATE SET ver = ?3, last = ?4, name = CASE WHEN ?8 = 1 THEN '' WHEN ?5 <> '' THEN ?5 ELSE name END, gv = CASE WHEN ?6 > 0 THEN ?6 ELSE gv END, pv = CASE WHEN ?7 > 0 THEN ?7 ELSE pv END"
+      ).bind(id, app, ver, now, name, gv, pv, clr).run();
       try {
         const net = await netCode(req, env);
         if (net) await env.DB.prepare('UPDATE pings SET net = ?1 WHERE id = ?2').bind(net, id).run();
